@@ -290,6 +290,106 @@ model FileReference {
   @@index([fileId])
   @@index([projectId])
 }
+
+// Comprehensive audit log for compliance and security
+model AuditLog {
+  id          String         @id @default(uuid())
+  timestamp   DateTime       @default(now())
+  eventType   AuditEventType
+  outcome     AuditOutcome
+
+  // Actor information
+  userId      String?
+  slackUserId String?
+  ipAddress   String?
+  userAgent   String?
+
+  // Resource information
+  projectId   String?
+  fileId      String?
+  fileVersionId String?
+
+  // Additional context
+  details     Json           @default("{}")
+
+  @@index([timestamp])
+  @@index([userId])
+  @@index([projectId])
+  @@index([fileId])
+  @@index([eventType])
+  @@index([outcome])
+}
+
+enum AuditEventType {
+  // File operations
+  FILE_UPLOAD
+  FILE_DOWNLOAD
+  FILE_VIEW
+  FILE_CHECKOUT
+  FILE_CHECKIN
+  FILE_DELETE
+  FILE_RESTORE
+
+  // Access events
+  ACCESS_GRANTED
+  ACCESS_DENIED
+  ACCESS_REVOKED
+
+  // Project operations
+  PROJECT_CREATE
+  PROJECT_DELETE
+  PROJECT_MEMBER_ADD
+  PROJECT_MEMBER_REMOVE
+
+  // Security events
+  DOWNLOAD_TOKEN_CREATED
+  DOWNLOAD_TOKEN_USED
+  DOWNLOAD_TOKEN_EXPIRED
+  SECURE_DELETE_STARTED
+  SECURE_DELETE_COMPLETED
+
+  // Administrative
+  ADMIN_OVERRIDE
+  LOCK_FORCE_RELEASE
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+  DENIED
+  PARTIAL
+}
+
+// Track secure deletion requests for compliance
+model DeletionRecord {
+  id              String   @id @default(uuid())
+  requestedAt     DateTime @default(now())
+  completedAt     DateTime?
+  requestedById   String
+
+  // What was deleted
+  projectId       String?
+  fileId          String?
+  contentHash     String?
+
+  // Deletion details
+  reason          String
+  status          DeletionStatus @default(PENDING)
+  secureWipeUsed  Boolean  @default(false)
+  verificationHash String?  // Hash proving deletion
+
+  @@index([status])
+  @@index([projectId])
+  @@index([requestedAt])
+}
+
+enum DeletionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  VERIFIED
+}
 ```
 
 ---
@@ -364,6 +464,732 @@ This prevents accidentally leaking file info to unauthorized channels.
 
 ---
 
+## Security & Compliance
+
+This section covers the security infrastructure required for handling NDA-protected client data.
+
+### Encryption at Rest
+
+All stored files are encrypted using AES-256-GCM before being written to disk. The system supports two encryption modes:
+
+#### Option 1: Filesystem-Level Encryption (Recommended for Simplicity)
+
+Use LUKS/dm-crypt to encrypt the entire storage volume:
+
+```bash
+# Setup encrypted volume (one-time)
+cryptsetup luksFormat /dev/sdX
+cryptsetup luksOpen /dev/sdX files_encrypted
+mkfs.ext4 /dev/mapper/files_encrypted
+mount /dev/mapper/files_encrypted /var/files
+
+# Add to /etc/crypttab for automatic unlock at boot (with key file)
+# files_encrypted /dev/sdX /root/storage.key luks
+```
+
+**Pros:** Simple, transparent to application, hardware acceleration
+**Cons:** All-or-nothing encryption, key management at OS level
+
+#### Option 2: Application-Level Encryption (Recommended for Multi-Tenant)
+
+Encrypt files before storing, allowing per-project encryption keys:
+
+```typescript
+import * as crypto from 'crypto';
+
+class EncryptedStorageService extends StorageService {
+  private readonly algorithm = 'aes-256-gcm';
+  private readonly keyLength = 32;  // 256 bits
+  private readonly ivLength = 16;   // 128 bits
+  private readonly authTagLength = 16;
+
+  constructor(
+    basePath: string,
+    private keyService: KeyManagementService
+  ) {
+    super(basePath);
+  }
+
+  async store(filePath: string, projectId: string): Promise<{ hash: string; size: number }> {
+    // Get project-specific encryption key
+    const key = await this.keyService.getProjectKey(projectId);
+
+    // Read and encrypt the file
+    const plaintext = await fs.readFile(filePath);
+    const iv = crypto.randomBytes(this.ivLength);
+    const cipher = crypto.createCipheriv(this.algorithm, key, iv);
+
+    const encrypted = Buffer.concat([
+      iv,                                    // Prepend IV
+      cipher.update(plaintext),
+      cipher.final(),
+      cipher.getAuthTag()                    // Append auth tag
+    ]);
+
+    // Write encrypted content to temp file
+    const tempPath = `${filePath}.enc`;
+    await fs.writeFile(tempPath, encrypted);
+
+    // Store using parent (content-addressed by encrypted content hash)
+    const result = await super.store(tempPath);
+    await fs.unlink(tempPath);
+
+    return result;
+  }
+
+  async retrieve(hash: string, projectId: string): Promise<Buffer> {
+    const key = await this.keyService.getProjectKey(projectId);
+    const filePath = this.getPath(hash);
+    const encrypted = await fs.readFile(filePath);
+
+    // Extract IV, ciphertext, and auth tag
+    const iv = encrypted.subarray(0, this.ivLength);
+    const authTag = encrypted.subarray(-this.authTagLength);
+    const ciphertext = encrypted.subarray(this.ivLength, -this.authTagLength);
+
+    // Decrypt
+    const decipher = crypto.createDecipheriv(this.algorithm, key, iv);
+    decipher.setAuthTag(authTag);
+
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  }
+}
+```
+
+#### Key Management Service
+
+```typescript
+class KeyManagementService {
+  constructor(
+    private prisma: PrismaClient,
+    private masterKey: Buffer  // From environment/HSM/Vault
+  ) {}
+
+  // Derive project-specific key from master key
+  async getProjectKey(projectId: string): Promise<Buffer> {
+    // Use HKDF to derive project-specific key
+    return crypto.hkdfSync(
+      'sha256',
+      this.masterKey,
+      projectId,           // Salt with project ID
+      'file-encryption',   // Info/context
+      32                   // Key length
+    );
+  }
+
+  // Rotate master key (requires re-encryption of all files)
+  async rotateMasterKey(newMasterKey: Buffer): Promise<void> {
+    // This is a major operation - see secure deletion section
+    // 1. Re-encrypt all files with new key
+    // 2. Update master key
+    // 3. Securely delete old encrypted files
+  }
+}
+```
+
+### Audit Logging Service
+
+All file operations are logged to an append-only audit log for compliance and forensics.
+
+```typescript
+class AuditService {
+  constructor(private prisma: PrismaClient) {}
+
+  async log(event: {
+    eventType: AuditEventType;
+    outcome: AuditOutcome;
+    userId?: string;
+    slackUserId?: string;
+    projectId?: string;
+    fileId?: string;
+    fileVersionId?: string;
+    ipAddress?: string;
+    userAgent?: string;
+    details?: Record<string, unknown>;
+  }): Promise<AuditLog> {
+    return this.prisma.auditLog.create({
+      data: {
+        ...event,
+        details: event.details ?? {}
+      }
+    });
+  }
+
+  // Convenience methods for common events
+  async logFileDownload(
+    userId: string,
+    fileId: string,
+    versionNumber: number,
+    request: { ip: string; userAgent: string }
+  ): Promise<void> {
+    await this.log({
+      eventType: 'FILE_DOWNLOAD',
+      outcome: 'SUCCESS',
+      userId,
+      fileId,
+      ipAddress: request.ip,
+      userAgent: request.userAgent,
+      details: { versionNumber }
+    });
+  }
+
+  async logAccessDenied(
+    userId: string,
+    projectId: string,
+    reason: string,
+    request?: { ip: string; userAgent: string }
+  ): Promise<void> {
+    await this.log({
+      eventType: 'ACCESS_DENIED',
+      outcome: 'DENIED',
+      userId,
+      projectId,
+      ipAddress: request?.ip,
+      userAgent: request?.userAgent,
+      details: { reason }
+    });
+  }
+
+  // Query audit logs for compliance reports
+  async getFileAccessHistory(
+    fileId: string,
+    options: { from?: Date; to?: Date; limit?: number }
+  ): Promise<AuditLog[]> {
+    return this.prisma.auditLog.findMany({
+      where: {
+        fileId,
+        eventType: { in: ['FILE_DOWNLOAD', 'FILE_VIEW', 'FILE_CHECKOUT'] },
+        timestamp: {
+          gte: options.from,
+          lte: options.to
+        }
+      },
+      orderBy: { timestamp: 'desc' },
+      take: options.limit ?? 1000
+    });
+  }
+
+  // Generate compliance report for a project
+  async generateComplianceReport(
+    projectId: string,
+    dateRange: { from: Date; to: Date }
+  ): Promise<ComplianceReport> {
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        projectId,
+        timestamp: { gte: dateRange.from, lte: dateRange.to }
+      },
+      orderBy: { timestamp: 'asc' }
+    });
+
+    return {
+      projectId,
+      dateRange,
+      totalEvents: logs.length,
+      eventsByType: this.groupBy(logs, 'eventType'),
+      accessDenials: logs.filter(l => l.outcome === 'DENIED'),
+      uniqueUsers: [...new Set(logs.map(l => l.userId).filter(Boolean))],
+      downloadCount: logs.filter(l => l.eventType === 'FILE_DOWNLOAD').length
+    };
+  }
+}
+```
+
+#### Audit Log Retention
+
+```typescript
+// Audit logs must be retained for NDA compliance period (typically 3-7 years)
+// Configure in environment:
+// AUDIT_LOG_RETENTION_YEARS=7
+
+class AuditRetentionService {
+  constructor(
+    private prisma: PrismaClient,
+    private archiveStorage: ArchiveStorageService
+  ) {}
+
+  // Archive old logs to long-term storage
+  async archiveOldLogs(olderThan: Date): Promise<void> {
+    const logs = await this.prisma.auditLog.findMany({
+      where: { timestamp: { lt: olderThan } }
+    });
+
+    // Export to immutable archive (e.g., S3 Glacier, write-once storage)
+    await this.archiveStorage.archive({
+      type: 'audit_logs',
+      dateRange: { to: olderThan },
+      data: logs,
+      checksum: this.calculateChecksum(logs)
+    });
+
+    // Only delete after successful archive
+    await this.prisma.auditLog.deleteMany({
+      where: { timestamp: { lt: olderThan } }
+    });
+  }
+}
+```
+
+### Download Tracking Service
+
+All file downloads go through a tracked download service with single-use tokens.
+
+```typescript
+import * as crypto from 'crypto';
+
+interface DownloadToken {
+  token: string;
+  userId: string;
+  fileId: string;
+  versionNumber: number;
+  projectId: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+class DownloadService {
+  private readonly TOKEN_EXPIRY_SECONDS = 300;  // 5 minutes
+
+  constructor(
+    private prisma: PrismaClient,
+    private storage: StorageService,
+    private audit: AuditService,
+    private redis: RedisClient  // For token storage
+  ) {}
+
+  // Generate a secure, single-use download token
+  async createDownloadToken(
+    userId: string,
+    fileId: string,
+    versionNumber: number
+  ): Promise<string> {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      include: { project: true }
+    });
+
+    if (!file) throw new FileNotFoundError();
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+
+    const tokenData: DownloadToken = {
+      token,
+      userId,
+      fileId,
+      versionNumber,
+      projectId: file.projectId,
+      createdAt: now,
+      expiresAt: now + (this.TOKEN_EXPIRY_SECONDS * 1000),
+      used: false
+    };
+
+    // Store token in Redis with expiry
+    await this.redis.setex(
+      `download:${token}`,
+      this.TOKEN_EXPIRY_SECONDS,
+      JSON.stringify(tokenData)
+    );
+
+    // Log token creation
+    await this.audit.log({
+      eventType: 'DOWNLOAD_TOKEN_CREATED',
+      outcome: 'SUCCESS',
+      userId,
+      fileId,
+      projectId: file.projectId,
+      details: { versionNumber, expiresIn: this.TOKEN_EXPIRY_SECONDS }
+    });
+
+    return token;
+  }
+
+  // Validate and consume a download token (single-use)
+  async consumeToken(
+    token: string,
+    requestUserId: string,
+    request: { ip: string; userAgent: string }
+  ): Promise<DownloadToken | null> {
+    const key = `download:${token}`;
+    const data = await this.redis.get(key);
+
+    if (!data) {
+      await this.audit.log({
+        eventType: 'DOWNLOAD_TOKEN_EXPIRED',
+        outcome: 'DENIED',
+        userId: requestUserId,
+        ipAddress: request.ip,
+        userAgent: request.userAgent,
+        details: { token: token.substring(0, 8) + '...' }
+      });
+      return null;
+    }
+
+    const tokenData: DownloadToken = JSON.parse(data);
+
+    // Verify the requesting user matches the token owner
+    if (tokenData.userId !== requestUserId) {
+      await this.audit.logAccessDenied(
+        requestUserId,
+        tokenData.projectId,
+        'Download token user mismatch',
+        request
+      );
+      return null;
+    }
+
+    // Consume the token (single-use)
+    await this.redis.del(key);
+
+    // Log successful token use
+    await this.audit.log({
+      eventType: 'DOWNLOAD_TOKEN_USED',
+      outcome: 'SUCCESS',
+      userId: requestUserId,
+      fileId: tokenData.fileId,
+      projectId: tokenData.projectId,
+      ipAddress: request.ip,
+      userAgent: request.userAgent,
+      details: { versionNumber: tokenData.versionNumber }
+    });
+
+    return tokenData;
+  }
+
+  // Execute a tracked download
+  async download(
+    token: string,
+    requestUserId: string,
+    request: { ip: string; userAgent: string }
+  ): Promise<{ stream: ReadStream; filename: string; mimeType: string } | null> {
+    const tokenData = await this.consumeToken(token, requestUserId, request);
+    if (!tokenData) return null;
+
+    // Get the file and version
+    const file = await this.prisma.file.findUnique({
+      where: { id: tokenData.fileId },
+      include: {
+        versions: {
+          where: { versionNumber: tokenData.versionNumber }
+        }
+      }
+    });
+
+    if (!file || file.versions.length === 0) return null;
+
+    const version = file.versions[0];
+    const filePath = this.storage.getPath(version.contentHash);
+
+    // Log the actual download
+    await this.audit.logFileDownload(
+      requestUserId,
+      tokenData.fileId,
+      tokenData.versionNumber,
+      request
+    );
+
+    return {
+      stream: createReadStream(filePath),
+      filename: file.name,
+      mimeType: file.mimeType
+    };
+  }
+}
+```
+
+### Secure Deletion Service
+
+Implements secure file deletion with verification for NDA compliance.
+
+```typescript
+class SecureDeletionService {
+  constructor(
+    private prisma: PrismaClient,
+    private storage: StorageService,
+    private audit: AuditService
+  ) {}
+
+  // Securely delete a file version's content
+  async secureDeleteContent(
+    contentHash: string,
+    requestedById: string,
+    reason: string
+  ): Promise<DeletionRecord> {
+    // Check if any other versions reference this content
+    const refCount = await this.prisma.fileVersion.count({
+      where: { contentHash }
+    });
+
+    if (refCount > 0) {
+      throw new Error(
+        `Cannot delete: ${refCount} version(s) still reference this content. ` +
+        `Delete the file versions first.`
+      );
+    }
+
+    // Create deletion record
+    const record = await this.prisma.deletionRecord.create({
+      data: {
+        contentHash,
+        requestedById,
+        reason,
+        status: 'IN_PROGRESS'
+      }
+    });
+
+    await this.audit.log({
+      eventType: 'SECURE_DELETE_STARTED',
+      outcome: 'SUCCESS',
+      userId: requestedById,
+      details: { contentHash, reason, deletionRecordId: record.id }
+    });
+
+    try {
+      const filePath = this.storage.getPath(contentHash);
+
+      // Secure overwrite using DoD 5220.22-M standard (3 passes)
+      await this.secureOverwrite(filePath);
+
+      // Delete the file
+      await fs.unlink(filePath);
+
+      // Generate verification hash (hash of zeros to prove overwrite)
+      const verificationHash = crypto.createHash('sha256')
+        .update(`deleted:${contentHash}:${Date.now()}`)
+        .digest('hex');
+
+      // Update deletion record
+      await this.prisma.deletionRecord.update({
+        where: { id: record.id },
+        data: {
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          secureWipeUsed: true,
+          verificationHash
+        }
+      });
+
+      await this.audit.log({
+        eventType: 'SECURE_DELETE_COMPLETED',
+        outcome: 'SUCCESS',
+        userId: requestedById,
+        details: {
+          contentHash,
+          deletionRecordId: record.id,
+          verificationHash
+        }
+      });
+
+      return await this.prisma.deletionRecord.findUnique({
+        where: { id: record.id }
+      });
+
+    } catch (error) {
+      await this.prisma.deletionRecord.update({
+        where: { id: record.id },
+        data: { status: 'FAILED' }
+      });
+
+      await this.audit.log({
+        eventType: 'SECURE_DELETE_COMPLETED',
+        outcome: 'FAILURE',
+        userId: requestedById,
+        details: { contentHash, error: error.message }
+      });
+
+      throw error;
+    }
+  }
+
+  // DoD 5220.22-M secure overwrite (3 passes)
+  private async secureOverwrite(filePath: string): Promise<void> {
+    const stats = await fs.stat(filePath);
+    const size = stats.size;
+    const fd = await fs.open(filePath, 'r+');
+
+    try {
+      // Pass 1: Write zeros
+      const zeros = Buffer.alloc(Math.min(size, 64 * 1024), 0x00);
+      await this.overwriteFile(fd, size, zeros);
+
+      // Pass 2: Write ones
+      const ones = Buffer.alloc(Math.min(size, 64 * 1024), 0xFF);
+      await this.overwriteFile(fd, size, ones);
+
+      // Pass 3: Write random data
+      for (let offset = 0; offset < size; offset += 64 * 1024) {
+        const chunkSize = Math.min(64 * 1024, size - offset);
+        const randomData = crypto.randomBytes(chunkSize);
+        await fd.write(randomData, 0, chunkSize, offset);
+      }
+
+      // Sync to ensure writes are flushed to disk
+      await fd.sync();
+    } finally {
+      await fd.close();
+    }
+  }
+
+  private async overwriteFile(
+    fd: fs.FileHandle,
+    size: number,
+    pattern: Buffer
+  ): Promise<void> {
+    for (let offset = 0; offset < size; offset += pattern.length) {
+      const chunkSize = Math.min(pattern.length, size - offset);
+      await fd.write(pattern, 0, chunkSize, offset);
+    }
+    await fd.sync();
+  }
+
+  // Delete an entire project and all its data
+  async deleteProject(
+    projectId: string,
+    requestedById: string,
+    reason: string
+  ): Promise<ProjectDeletionReport> {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        files: {
+          include: { versions: true }
+        }
+      }
+    });
+
+    if (!project) throw new Error('Project not found');
+
+    const report: ProjectDeletionReport = {
+      projectId,
+      projectName: project.name,
+      requestedBy: requestedById,
+      requestedAt: new Date(),
+      filesDeleted: 0,
+      versionsDeleted: 0,
+      contentHashesDeleted: [],
+      errors: []
+    };
+
+    // Collect all unique content hashes
+    const contentHashes = new Set<string>();
+    for (const file of project.files) {
+      for (const version of file.versions) {
+        contentHashes.add(version.contentHash);
+      }
+    }
+
+    // Delete database records first (within transaction)
+    await this.prisma.$transaction(async (tx) => {
+      // Delete file references
+      await tx.fileReference.deleteMany({ where: { projectId } });
+
+      // Delete file versions
+      for (const file of project.files) {
+        await tx.fileVersion.deleteMany({ where: { fileId: file.id } });
+        await tx.fileLock.deleteMany({ where: { fileId: file.id } });
+        report.versionsDeleted += file.versions.length;
+      }
+
+      // Delete files
+      await tx.file.deleteMany({ where: { projectId } });
+      report.filesDeleted = project.files.length;
+
+      // Delete project
+      await tx.project.delete({ where: { id: projectId } });
+    });
+
+    // Securely delete content (outside transaction - slower but thorough)
+    for (const hash of contentHashes) {
+      // Check if any OTHER project still references this content
+      const otherRefs = await this.prisma.fileVersion.count({
+        where: { contentHash: hash }
+      });
+
+      if (otherRefs === 0) {
+        try {
+          await this.secureDeleteContent(hash, requestedById, reason);
+          report.contentHashesDeleted.push(hash);
+        } catch (error) {
+          report.errors.push({
+            contentHash: hash,
+            error: error.message
+          });
+        }
+      }
+    }
+
+    report.completedAt = new Date();
+
+    // Log project deletion
+    await this.audit.log({
+      eventType: 'PROJECT_DELETE',
+      outcome: report.errors.length === 0 ? 'SUCCESS' : 'PARTIAL',
+      userId: requestedById,
+      projectId,
+      details: {
+        projectName: project.name,
+        filesDeleted: report.filesDeleted,
+        versionsDeleted: report.versionsDeleted,
+        contentHashesDeleted: report.contentHashesDeleted.length,
+        errors: report.errors
+      }
+    });
+
+    return report;
+  }
+
+  // Generate deletion certificate for compliance
+  async generateDeletionCertificate(
+    deletionRecordId: string
+  ): Promise<DeletionCertificate> {
+    const record = await this.prisma.deletionRecord.findUnique({
+      where: { id: deletionRecordId }
+    });
+
+    if (!record || record.status !== 'COMPLETED') {
+      throw new Error('Deletion not completed');
+    }
+
+    return {
+      certificateId: crypto.randomUUID(),
+      deletionRecordId: record.id,
+      contentHash: record.contentHash,
+      deletedAt: record.completedAt,
+      secureWipeMethod: 'DoD 5220.22-M (3-pass)',
+      verificationHash: record.verificationHash,
+      requestedBy: record.requestedById,
+      reason: record.reason
+    };
+  }
+}
+
+interface ProjectDeletionReport {
+  projectId: string;
+  projectName: string;
+  requestedBy: string;
+  requestedAt: Date;
+  completedAt?: Date;
+  filesDeleted: number;
+  versionsDeleted: number;
+  contentHashesDeleted: string[];
+  errors: Array<{ contentHash: string; error: string }>;
+}
+
+interface DeletionCertificate {
+  certificateId: string;
+  deletionRecordId: string;
+  contentHash: string;
+  deletedAt: Date;
+  secureWipeMethod: string;
+  verificationHash: string;
+  requestedBy: string;
+  reason: string;
+}
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -382,11 +1208,16 @@ productinventor/
 │   │   ├── project.service.ts    # Project/hub management
 │   │   ├── access.service.ts     # Channel-based access control
 │   │   ├── storage.service.ts    # Content-addressed file storage
+│   │   ├── encrypted-storage.service.ts  # AES-256-GCM encryption layer
+│   │   ├── key-management.service.ts     # Encryption key derivation
 │   │   ├── file.service.ts       # File operations
 │   │   ├── lock.service.ts       # Lock management
 │   │   ├── user.service.ts       # User management
 │   │   ├── hub.service.ts        # File Hub message management
-│   │   └── reference.service.ts  # Reference card management
+│   │   ├── reference.service.ts  # Reference card management
+│   │   ├── audit.service.ts      # Comprehensive audit logging
+│   │   ├── download.service.ts   # Tracked downloads with tokens
+│   │   └── deletion.service.ts   # Secure deletion with verification
 │   ├── listeners/
 │   │   ├── commands/
 │   │   │   ├── files.ts          # /files command (init, list, upload)
@@ -1084,8 +1915,25 @@ SLACK_APP_TOKEN=xapp-your-app-token
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/file_checkout
 
+# Redis (for download tokens and caching)
+REDIS_URL=redis://localhost:6379
+
 # File Storage
 STORAGE_PATH=/var/files              # Content-addressed storage directory
+
+# Encryption (Required for production)
+# Generate with: openssl rand -base64 32
+ENCRYPTION_MASTER_KEY=your-base64-encoded-32-byte-key
+ENCRYPTION_MODE=application          # 'application' or 'filesystem'
+
+# Security Settings
+DOWNLOAD_TOKEN_EXPIRY_SECONDS=300    # 5 minutes
+SECURE_DELETE_ENABLED=true           # Use DoD 5220.22-M secure wipe
+
+# Audit & Compliance
+AUDIT_LOG_RETENTION_YEARS=7          # Retain logs for NDA compliance
+AUDIT_ARCHIVE_ENABLED=true           # Archive old logs to long-term storage
+AUDIT_ARCHIVE_PATH=/var/audit-archive
 
 # App Settings
 NODE_ENV=development
@@ -1100,58 +1948,111 @@ LOCK_EXPIRY_HOURS=24
 ### Phase 1: Project Setup
 - Initialize Node.js/TypeScript project with Bolt.js
 - Create Slack App with required OAuth scopes (`commands`, `chat:write`, `chat:write.public`, `files:read`, `users:read`, `channels:read`, `groups:read`)
-- Set up PostgreSQL database with Prisma
+- Set up PostgreSQL database with Prisma (including AuditLog, DeletionRecord models)
+- Set up Redis for download tokens
 - Create content-addressed storage directory structure
+- Configure encrypted storage volume (LUKS) or application-level encryption
 
-### Phase 2: Multi-Project Foundation
+### Phase 2: Security Foundation (Before Any Client Data)
+- Implement Key Management service (master key, project key derivation)
+- Implement Encrypted Storage service (AES-256-GCM encryption/decryption)
+- Implement Audit service (comprehensive logging for all operations)
+- Implement Download service (token generation, single-use validation, tracking)
+- Implement Secure Deletion service (DoD 5220.22-M wipe, deletion certificates)
+- Set up audit log archival infrastructure
+
+### Phase 3: Multi-Project Foundation
 - Implement Project service (create, find by channel, list accessible)
 - Implement Access service (channel membership checks)
 - Implement User service (Slack identity mapping)
 - Build `/files init` command to create project hubs
+- Integrate audit logging with all project operations
 
-### Phase 3: Core File Services
+### Phase 4: Core File Services
 - Implement Storage service (content-addressed: store, retrieve by hash)
+- Integrate encryption layer with storage service
 - Implement Lock service (acquire, release, expiration)
 - Implement File service (list by project, checkout, checkin)
 - Build `/files` and `/files upload` commands
+- Integrate audit logging with all file operations
 
-### Phase 4: Hub & Reference System
+### Phase 5: Hub & Reference System
 - Implement Hub service (create/update hub messages, post thread activity)
 - Implement Reference service (share files, update reference cards)
 - Build hub file card Block Kit UI
 - Build reference card Block Kit UI with staleness indicators
 - Add access-denied card for unauthorized viewers
 
-### Phase 5: Slack Commands & Actions
+### Phase 6: Slack Commands & Actions
 - Build `/share` command with project-aware file lookup
 - Implement checkout/download button actions with access checks
+- Integrate download tracking with all download actions
 - Build check-in modal with file upload
 - Implement version history view
 - Add "View in #project-files" deep-linking
 
-### Phase 6: File Transfer
-- Implement secure file download with signed URLs
+### Phase 7: File Transfer
+- Implement secure file download with single-use tokens
+- Implement download tracking and audit logging
 - Handle file upload from Slack
-- Process and store in content-addressed storage
+- Process, encrypt, and store in content-addressed storage
 
-### Phase 7: Polish & Deploy
+### Phase 8: Compliance & Administration
+- Build admin dashboard for audit log queries
+- Implement compliance report generation
+- Build project deletion workflow with secure wipe
+- Implement deletion certificate generation
+- Create client offboarding procedures
+- Set up audit log retention and archival
+
+### Phase 9: Polish & Deploy
 - Error handling and edge cases
 - Reference card cleanup (deleted messages)
 - Access control edge cases (user removed from channel)
+- Security testing and penetration testing
 - Unit and integration tests
-- Docker containerization
+- Docker containerization with secrets management
 - Deployment and monitoring
 
 ---
 
 ## Security Considerations
 
-1. **Slack Signature Verification** - Verify all incoming requests
+### Authentication & Authorization
+1. **Slack Signature Verification** - Verify all incoming requests using SLACK_SIGNING_SECRET
 2. **User Authorization** - Map Slack users to internal IDs, validate on every action
-3. **Signed Download URLs** - Time-limited URLs for file downloads
-4. **Input Sanitization** - Prevent path traversal in file names
-5. **Rate Limiting** - Protect against abuse
-6. **Audit Logging** - Track all file operations
+3. **Channel-Based Access Control** - Verify Slack channel membership for all file operations
+4. **Token-Based Downloads** - Single-use, time-limited tokens for file downloads
+
+### Data Protection
+5. **Encryption at Rest** - All files encrypted using AES-256-GCM before storage
+6. **Per-Project Keys** - Encryption keys derived per-project using HKDF
+7. **Secure Key Management** - Master key from environment/HSM, never logged or exposed
+8. **Encrypted Backups** - Backup systems must preserve encryption
+
+### Audit & Compliance
+9. **Comprehensive Audit Logging** - Log all file operations with user, timestamp, IP, outcome
+10. **Access Denial Logging** - Track and alert on failed access attempts
+11. **Immutable Audit Trail** - Append-only logs with integrity verification
+12. **Long-Term Retention** - 7-year retention for NDA compliance
+13. **Compliance Reports** - Generate per-project access reports for audits
+
+### Secure Deletion
+14. **DoD 5220.22-M Wipe** - 3-pass secure overwrite for file deletion
+15. **Deletion Certificates** - Cryptographic proof of deletion for compliance
+16. **Project Offboarding** - Complete data removal when client relationship ends
+17. **Reference Counting** - Prevent deletion of shared content
+
+### Input Validation
+18. **Path Traversal Prevention** - Validate and sanitize all file paths
+19. **Filename Validation** - Whitelist allowed characters, reject dangerous patterns
+20. **Size Limits** - Enforce maximum file sizes to prevent DoS
+
+### Infrastructure Security
+21. **Rate Limiting** - Protect against abuse and enumeration attacks
+22. **HTTPS Only** - All traffic encrypted in transit
+23. **Secrets Management** - Environment variables for sensitive config, never in code
+24. **Minimal Permissions** - Application runs with least required privileges
 
 ---
 
