@@ -1,6 +1,6 @@
 # File Check-In/Check-Out System - Implementation Plan
 
-A Slack-integrated file management system with Git LFS versioning and exclusive checkout (locking) capabilities.
+A Slack-integrated file management system with content-addressed storage, versioning, and exclusive checkout (locking) capabilities.
 
 ## Core Concept
 
@@ -56,15 +56,15 @@ Users interact with files entirely through Slack. Each **project has its own Fil
 │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
 └───────────┴────────────────────┴────────────────────┴───────────────────────┘
                                  │
-            ┌────────────────────┼────────────────────┐
-            ▼                    ▼                    ▼
-┌───────────────────┐  ┌─────────────────┐  ┌─────────────────────┐
-│   PostgreSQL      │  │   Git LFS       │  │   Object Storage    │
-│   (Metadata)      │  │   Repository    │  │   (S3/MinIO)        │
-│   - Locks         │  │   - Pointers    │  │   - File Blobs      │
-│   - Users         │  │   - History     │  │                     │
-│   - Versions      │  │                 │  │                     │
-└───────────────────┘  └─────────────────┘  └─────────────────────┘
+            ┌────────────────────┴────────────────────┐
+            ▼                                        ▼
+┌───────────────────────────────┐  ┌─────────────────────────────────┐
+│         PostgreSQL            │  │   Content-Addressed Storage     │
+│         (Metadata)            │  │   /var/files/                   │
+│   - Projects & Files          │  │   ab/cd/abcd1234...             │
+│   - Locks & Versions          │  │   (deduplicated file blobs)     │
+│   - Users & References        │  │                                 │
+└───────────────────────────────┘  └─────────────────────────────────┘
 ```
 
 ## Key Features
@@ -73,7 +73,7 @@ Users interact with files entirely through Slack. Each **project has its own Fil
 2. **Multi-Project Hubs** - Each project gets its own hub channel (e.g., `#alpha-files`, `#beta-files`)
 3. **Channel-Based Access Control** - Only hub channel members can access project files
 4. **Exclusive Checkout** - Files are locked to one user at a time during editing
-5. **Version Control** - Full version history via Git LFS with downloadable older versions
+5. **Version Control** - Full version history with content-addressed storage and downloadable older versions
 6. **Smart Reference Cards** - When shared elsewhere, cards show version at share time + current version
 7. **Cross-Project Isolation** - Files and references are siloed per project for confidentiality
 
@@ -151,10 +151,34 @@ When someone shares a file link in another channel:
 | **Slack Integration** | Bolt.js | Official Slack app framework |
 | **Block Kit** | slack-block-builder | Declarative UI construction |
 | **Backend** | Node.js 20+ / TypeScript | Application runtime |
-| **Database** | PostgreSQL 15+ | Metadata, locks, sessions |
+| **Database** | PostgreSQL 15+ | Metadata, locks, versions |
 | **ORM** | Prisma | Type-safe database access |
-| **File Storage** | Git LFS + S3/MinIO | Versioned file storage |
-| **Git Operations** | simple-git | Git command interface |
+| **File Storage** | Content-addressed filesystem | Deduplicated file blobs |
+
+### Storage Architecture
+
+Files are stored by their SHA256 hash on the local filesystem. PostgreSQL tracks all metadata and versions.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         YOUR SERVER                             │
+│                                                                 │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────────┐   │
+│  │ Bolt.js App │────▶│ PostgreSQL  │     │ /var/files/     │   │
+│  │             │     │ (metadata)  │     │ ab/cd/abcd...   │   │
+│  │             │─────────────────────────│ de/fg/defg...   │   │
+│  └─────────────┘     └─────────────┘     └─────────────────┘   │
+│                                                                 │
+│  No Git. No LFS. No complexity.                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- Dead simple - just files in folders
+- Automatic deduplication (same content = same hash)
+- PostgreSQL tracks all versions
+- No external dependencies
+- Fast direct file access
 
 ---
 
@@ -198,7 +222,7 @@ model File {
   projectId      String                  // Files belong to a project
   name           String
   path           String                  // Path within project (e.g., "/designs/logo.psd")
-  lfsOid         String                  // Current version LFS OID
+  contentHash    String                  // SHA256 hash of current version content
   sizeBytes      BigInt
   mimeType       String
   currentVersion Int      @default(1)
@@ -221,9 +245,8 @@ model FileVersion {
   id            String   @id @default(uuid())
   fileId        String
   versionNumber Int
-  lfsOid        String              // SHA256 hash of content
+  contentHash   String              // SHA256 hash of content (storage path)
   sizeBytes     BigInt
-  commitSha     String
   uploadedById  String
   message       String?             // Check-in message
   createdAt     DateTime @default(now())
@@ -358,10 +381,9 @@ productinventor/
 │   ├── services/
 │   │   ├── project.service.ts    # Project/hub management
 │   │   ├── access.service.ts     # Channel-based access control
+│   │   ├── storage.service.ts    # Content-addressed file storage
 │   │   ├── file.service.ts       # File operations
 │   │   ├── lock.service.ts       # Lock management
-│   │   ├── git-lfs.service.ts    # Git LFS operations
-│   │   ├── version.service.ts    # Version history
 │   │   ├── user.service.ts       # User management
 │   │   ├── hub.service.ts        # File Hub message management
 │   │   └── reference.service.ts  # Reference card management
@@ -385,16 +407,15 @@ productinventor/
 │   │   ├── checkin-modal.blocks.ts
 │   │   └── version-history.blocks.ts
 │   ├── utils/
-│   │   ├── git.ts
+│   │   ├── hash.ts               # SHA256 hashing utilities
 │   │   ├── slack.ts              # Slack message helpers
 │   │   └── errors.ts
 │   └── types/
 │       └── index.ts
-└── lfs-storage/                  # Git LFS repository (per-project subdirs)
-    ├── project-alpha/
-    │   └── .git/lfs/objects/
-    └── project-beta/
-        └── .git/lfs/objects/
+└── storage/                      # Content-addressed file storage
+    └── ab/
+        └── cd/
+            └── abcd1234...       # Files named by SHA256 hash
 ```
 
 ---
@@ -559,6 +580,62 @@ When a file is shared elsewhere via `/share filename`:
 
 ## Core Service Logic
 
+### Storage Service (Content-Addressed)
+
+```typescript
+import * as crypto from 'crypto';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
+class StorageService {
+  constructor(private basePath: string = '/var/files') {}
+
+  // Store file and return its content hash
+  async store(filePath: string): Promise<{ hash: string; size: number }> {
+    const hash = await this.hashFile(filePath);
+    const destPath = this.getPath(hash);
+    const stats = await fs.stat(filePath);
+
+    // Only copy if not already stored (deduplication)
+    if (!await this.exists(hash)) {
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.copyFile(filePath, destPath);
+    }
+
+    return { hash, size: stats.size };
+  }
+
+  // Get filesystem path for a content hash
+  getPath(hash: string): string {
+    return path.join(this.basePath, hash.slice(0, 2), hash.slice(2, 4), hash);
+  }
+
+  // Check if content exists
+  async exists(hash: string): Promise<boolean> {
+    try {
+      await fs.access(this.getPath(hash));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Delete content (only if no versions reference it)
+  async delete(hash: string): Promise<void> {
+    await fs.unlink(this.getPath(hash));
+  }
+
+  private async hashFile(filePath: string): Promise<string> {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    for await (const chunk of stream) {
+      hash.update(chunk);
+    }
+    return hash.digest('hex');
+  }
+}
+```
+
 ### Lock Service
 
 ```typescript
@@ -585,20 +662,28 @@ class LockService {
 }
 ```
 
-### File Service Checkout Flow
+### File Service
 
 ```typescript
 class FileService {
-  async checkoutFile(fileId: string, userId: string): Promise<{ file: File; downloadUrl: string }> {
+  constructor(
+    private prisma: PrismaClient,
+    private storage: StorageService,
+    private lockService: LockService,
+    private hubService: HubService,
+    private referenceService: ReferenceService
+  ) {}
+
+  async checkoutFile(fileId: string, userId: string): Promise<{ file: File; filePath: string }> {
     const file = await this.prisma.file.findUnique({ where: { id: fileId } });
     if (!file) throw new FileNotFoundError();
 
     // Acquire lock (throws if locked by another)
     await this.lockService.acquireLock(fileId, userId);
 
-    // Generate download URL
-    const downloadUrl = await this.generateSignedUrl(file);
-    return { file, downloadUrl };
+    // Return path to file content
+    const filePath = this.storage.getPath(file.contentHash);
+    return { file, filePath };
   }
 
   async checkinFile(fileId: string, userId: string, uploadedFilePath: string, message?: string): Promise<FileVersion> {
@@ -608,15 +693,25 @@ class FileService {
       throw new UnauthorizedError('You must have the file checked out');
     }
 
-    // Store in Git LFS
-    const { oid, commitSha } = await this.gitLfs.storeFile(uploadedFilePath, file.name, userId, message);
+    // Store in content-addressed storage
+    const { hash, size } = await this.storage.store(uploadedFilePath);
 
     // Transaction: create version + update file + release lock
     const version = await this.prisma.$transaction(async (tx) => {
       const version = await tx.fileVersion.create({
-        data: { fileId, versionNumber: file.currentVersion + 1, lfsOid: oid, commitSha, uploadedById: userId, message }
+        data: {
+          fileId,
+          versionNumber: file.currentVersion + 1,
+          contentHash: hash,
+          sizeBytes: size,
+          uploadedById: userId,
+          message
+        }
       });
-      await tx.file.update({ where: { id: fileId }, data: { lfsOid: oid, currentVersion: file.currentVersion + 1 } });
+      await tx.file.update({
+        where: { id: fileId },
+        data: { contentHash: hash, sizeBytes: size, currentVersion: file.currentVersion + 1 }
+      });
       await tx.fileLock.delete({ where: { fileId } });
       return version;
     });
@@ -626,6 +721,20 @@ class FileService {
     await this.referenceService.updateAllReferences(fileId);
 
     return version;
+  }
+
+  // Download a specific version
+  async getVersionPath(fileId: string, versionNumber?: number): Promise<string> {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      include: { versions: true }
+    });
+
+    const version = versionNumber
+      ? file.versions.find(v => v.versionNumber === versionNumber)
+      : file.versions.find(v => v.versionNumber === file.currentVersion);
+
+    return this.storage.getPath(version.contentHash);
   }
 }
 ```
@@ -975,14 +1084,8 @@ SLACK_APP_TOKEN=xapp-your-app-token
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/file_checkout
 
-# Git LFS Repository Path
-LFS_REPO_PATH=/path/to/lfs-storage
-
-# Optional: S3 for LFS object storage
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_S3_BUCKET=file-checkout-lfs
-AWS_REGION=us-east-1
+# File Storage
+STORAGE_PATH=/var/files              # Content-addressed storage directory
 
 # App Settings
 NODE_ENV=development
@@ -998,7 +1101,7 @@ LOCK_EXPIRY_HOURS=24
 - Initialize Node.js/TypeScript project with Bolt.js
 - Create Slack App with required OAuth scopes (`commands`, `chat:write`, `chat:write.public`, `files:read`, `users:read`, `channels:read`, `groups:read`)
 - Set up PostgreSQL database with Prisma
-- Initialize Git LFS base repository structure
+- Create content-addressed storage directory structure
 
 ### Phase 2: Multi-Project Foundation
 - Implement Project service (create, find by channel, list accessible)
@@ -1007,7 +1110,7 @@ LOCK_EXPIRY_HOURS=24
 - Build `/files init` command to create project hubs
 
 ### Phase 3: Core File Services
-- Implement Git LFS service (store, retrieve, version history) with per-project repos
+- Implement Storage service (content-addressed: store, retrieve by hash)
 - Implement Lock service (acquire, release, expiration)
 - Implement File service (list by project, checkout, checkin)
 - Build `/files` and `/files upload` commands
@@ -1029,7 +1132,7 @@ LOCK_EXPIRY_HOURS=24
 ### Phase 6: File Transfer
 - Implement secure file download with signed URLs
 - Handle file upload from Slack
-- Process and store in Git LFS (per-project)
+- Process and store in content-addressed storage
 
 ### Phase 7: Polish & Deploy
 - Error handling and edge cases
@@ -1056,8 +1159,9 @@ LOCK_EXPIRY_HOURS=24
 
 | Challenge | Mitigation |
 |-----------|------------|
-| Large file uploads (>1GB) | External upload flow with signed S3 URLs |
+| Large file uploads (>1GB) | Chunked upload flow; streaming to disk |
 | Lock conflicts | Clear UI showing who has locks; admin override |
-| Git LFS storage growth | Garbage collection; archive old versions |
+| Storage growth | Garbage collection for unreferenced hashes; archive old versions |
 | Concurrent operations | Database transactions with row locking |
 | Slack API rate limits | Exponential backoff; batch operations |
+| Disk space monitoring | Alerts when storage approaches capacity |
