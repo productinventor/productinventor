@@ -1,10 +1,36 @@
 # File Check-In/Check-Out System - Implementation Plan
 
-A Slack-integrated file management system with Git LFS versioning and exclusive checkout (locking) capabilities.
+A Slack-integrated file management system with content-addressed storage, versioning, and exclusive checkout (locking) capabilities.
 
 ## Core Concept
 
-Users interact with files entirely through Slack. A **central File Hub channel** (`#files`) serves as the single source of truth, with each file having one persistent, updating message. When files are shared elsewhere, **Reference Cards** appear that stay aware of version changes.
+Users interact with files entirely through Slack. Each **project has its own File Hub channel** (e.g., `#project-alpha-files`, `#project-beta-files`) serving as the single source of truth for that project's files. **Access control is based on Slack channel membership** - if you're in the hub channel, you can access those files. When files are shared elsewhere, **Reference Cards** appear that stay aware of version changes.
+
+### Multi-Project Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SLACK WORKSPACE                                │
+│                                                                             │
+│  Project Alpha (Confidential)          Project Beta (Different Team)       │
+│  ┌─────────────────────────┐           ┌─────────────────────────┐         │
+│  │ #alpha-files (Hub)      │           │ #beta-files (Hub)       │         │
+│  │ - design-spec.psd       │           │ - api-docs.pdf          │         │
+│  │ - prototype.fig         │           │ - schema.sql            │         │
+│  │ Members: @alice @bob    │           │ Members: @charlie @dana │         │
+│  └─────────────────────────┘           └─────────────────────────┘         │
+│           │                                       │                         │
+│           │ Can share to                          │ Can share to            │
+│           ▼                                       ▼                         │
+│  ┌─────────────────────────┐           ┌─────────────────────────┐         │
+│  │ #alpha-design (team)    │           │ #beta-engineering       │         │
+│  │ Reference cards only    │           │ Reference cards only    │         │
+│  └─────────────────────────┘           └─────────────────────────┘         │
+│                                                                             │
+│  ❌ @charlie cannot see #alpha-files or its reference cards                │
+│  ❌ @alice cannot see #beta-files or its reference cards                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -30,50 +56,54 @@ Users interact with files entirely through Slack. A **central File Hub channel**
 │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
 └───────────┴────────────────────┴────────────────────┴───────────────────────┘
                                  │
-            ┌────────────────────┼────────────────────┐
-            ▼                    ▼                    ▼
-┌───────────────────┐  ┌─────────────────┐  ┌─────────────────────┐
-│   PostgreSQL      │  │   Git LFS       │  │   Object Storage    │
-│   (Metadata)      │  │   Repository    │  │   (S3/MinIO)        │
-│   - Locks         │  │   - Pointers    │  │   - File Blobs      │
-│   - Users         │  │   - History     │  │                     │
-│   - Versions      │  │                 │  │                     │
-└───────────────────┘  └─────────────────┘  └─────────────────────┘
+            ┌────────────────────┴────────────────────┐
+            ▼                                        ▼
+┌───────────────────────────────┐  ┌─────────────────────────────────┐
+│         PostgreSQL            │  │   Content-Addressed Storage     │
+│         (Metadata)            │  │   /var/files/                   │
+│   - Projects & Files          │  │   ab/cd/abcd1234...             │
+│   - Locks & Versions          │  │   (deduplicated file blobs)     │
+│   - Users & References        │  │                                 │
+└───────────────────────────────┘  └─────────────────────────────────┘
 ```
 
 ## Key Features
 
 1. **Slack Authentication** - Users authenticate via Slack identity, no GitHub accounts needed
-2. **Exclusive Checkout** - Files are locked to one user at a time during editing
-3. **Version Control** - Full version history via Git LFS with downloadable older versions
-4. **File Hub Channel** - Central `#files` channel with one persistent message per file
-5. **Smart Reference Cards** - When shared elsewhere, cards show version at share time + current version
+2. **Multi-Project Hubs** - Each project gets its own hub channel (e.g., `#alpha-files`, `#beta-files`)
+3. **Channel-Based Access Control** - Only hub channel members can access project files
+4. **Exclusive Checkout** - Files are locked to one user at a time during editing
+5. **Version Control** - Full version history with content-addressed storage and downloadable older versions
+6. **Smart Reference Cards** - When shared elsewhere, cards show version at share time + current version
+7. **Cross-Project Isolation** - Files and references are siloed per project for confidentiality
 
 ---
 
 ## File Hub + Reference Cards Architecture
 
 ### The Problem
-Without structure, file cards get scattered across channels, threads, and DMs - making it hard to find files or know their current status.
+Without structure, file cards get scattered across channels, threads, and DMs - making it hard to find files or know their current status. Additionally, different projects need isolated file spaces for confidentiality.
 
 ### The Solution
 
-#### 1. Central File Hub (`#files` channel)
+#### 1. Project File Hubs (one per project)
+- **Any channel can become a hub** via `/files init`
 - **One message per file** that updates in place as status changes
 - **Thread activity log** showing checkout/checkin history
-- **Pinnable** for quick access to important files
-- Single source of truth for file status
+- **Access = channel membership** - Slack handles permissions
+- Each project's files are completely isolated
 
-#### 2. Reference Cards (shared elsewhere)
-When someone shares a file link in another channel or DM:
+#### 2. Reference Cards (shared within project scope)
+When someone shares a file link in another channel:
 - Shows the **version at time of sharing**
 - **Auto-updates** to show if newer versions exist
-- Links back to the hub for full interaction
+- Links back to the project's hub
+- **Only visible to users with hub access**
 
 ### How It Works
 
 ```
-#files (File Hub)                          #design-team
+#alpha-files (Project Hub)                 #alpha-design (Team Channel)
 ┌─────────────────────────────┐            ┌─────────────────────────────┐
 │ 📁 brand-logo.psd           │            │ @sarah: Check out the new   │
 │ v5 | 12.3 MB | Available    │            │ logo I uploaded!            │
@@ -82,7 +112,7 @@ When someone shares a file link in another channel or DM:
 │ Thread:                     │            │ │ 📎 brand-logo.psd       │ │
 ├─ @mike checked in v5        │            │ │ Shared: v3 by @sarah    │ │
 ├─ @mike checked out          │            │ │ Current: v5 ⚠️ Updated  │ │
-├─ @sarah checked in v4       │            │ │ [View in #files] [Get v5]│ │
+├─ @sarah checked in v4       │            │ │ [View in #alpha-files]  │ │
 └─ ...                        │            │ └─────────────────────────┘ │
                                            └─────────────────────────────┘
 ```
@@ -121,10 +151,34 @@ When someone shares a file link in another channel or DM:
 | **Slack Integration** | Bolt.js | Official Slack app framework |
 | **Block Kit** | slack-block-builder | Declarative UI construction |
 | **Backend** | Node.js 20+ / TypeScript | Application runtime |
-| **Database** | PostgreSQL 15+ | Metadata, locks, sessions |
+| **Database** | PostgreSQL 15+ | Metadata, locks, versions |
 | **ORM** | Prisma | Type-safe database access |
-| **File Storage** | Git LFS + S3/MinIO | Versioned file storage |
-| **Git Operations** | simple-git | Git command interface |
+| **File Storage** | Content-addressed filesystem | Deduplicated file blobs |
+
+### Storage Architecture
+
+Files are stored by their SHA256 hash on the local filesystem. PostgreSQL tracks all metadata and versions.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         YOUR SERVER                             │
+│                                                                 │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────────┐   │
+│  │ Bolt.js App │────▶│ PostgreSQL  │     │ /var/files/     │   │
+│  │             │     │ (metadata)  │     │ ab/cd/abcd...   │   │
+│  │             │─────────────────────────│ de/fg/defg...   │   │
+│  └─────────────┘     └─────────────┘     └─────────────────┘   │
+│                                                                 │
+│  No Git. No LFS. No complexity.                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- Dead simple - just files in folders
+- Automatic deduplication (same content = same hash)
+- PostgreSQL tracks all versions
+- No external dependencies
+- Fast direct file access
 
 ---
 
@@ -144,13 +198,31 @@ model User {
   uploadedVersions FileVersion[]
   locks            FileLock[]
   sharedReferences FileReference[]
+  createdProjects  Project[]
+}
+
+// A project represents a file hub - one Slack channel = one project
+model Project {
+  id            String   @id @default(uuid())
+  name          String                  // Display name
+  slackTeamId   String
+  hubChannelId  String   @unique        // The Slack channel that is this project's hub
+  createdById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  createdBy User   @relation(fields: [createdById], references: [id])
+  files     File[]
+
+  @@index([slackTeamId])
 }
 
 model File {
   id             String   @id @default(uuid())
+  projectId      String                  // Files belong to a project
   name           String
-  path           String   @unique
-  lfsOid         String              // Current version LFS OID
+  path           String                  // Path within project (e.g., "/designs/logo.psd")
+  contentHash    String                  // SHA256 hash of current version content
   sizeBytes      BigInt
   mimeType       String
   currentVersion Int      @default(1)
@@ -158,21 +230,23 @@ model File {
   updatedAt      DateTime @updatedAt
 
   // Hub message tracking
-  hubChannelId   String?             // #files channel ID
-  hubMessageTs   String?             // Slack message timestamp (for updates)
+  hubMessageTs   String?                 // Slack message timestamp (for updates)
 
+  project    Project       @relation(fields: [projectId], references: [id])
   versions   FileVersion[]
   lock       FileLock?
   references FileReference[]
+
+  @@unique([projectId, path])            // Unique path per project
+  @@index([projectId])
 }
 
 model FileVersion {
   id            String   @id @default(uuid())
   fileId        String
   versionNumber Int
-  lfsOid        String              // SHA256 hash of content
+  contentHash   String              // SHA256 hash of content (storage path)
   sizeBytes     BigInt
-  commitSha     String
   uploadedById  String
   message       String?             // Check-in message
   createdAt     DateTime @default(now())
@@ -199,6 +273,7 @@ model FileLock {
 model FileReference {
   id              String   @id @default(uuid())
   fileId          String
+  projectId       String              // Denormalized for access checks
   sharedById      String
   sharedAt        DateTime @default(now())
   sharedVersion   Int                 // Version at time of sharing
@@ -213,8 +288,79 @@ model FileReference {
 
   @@unique([channelId, messageTs])
   @@index([fileId])
+  @@index([projectId])
 }
 ```
+
+---
+
+## Access Control
+
+Access control is based entirely on **Slack channel membership**. No separate permissions system needed.
+
+### How It Works
+
+```typescript
+class AccessService {
+  constructor(private slack: WebClient) {}
+
+  // Check if user can access a project's files
+  async canAccessProject(userId: string, project: Project): Promise<boolean> {
+    try {
+      const result = await this.slack.conversations.members({
+        channel: project.hubChannelId,
+        limit: 1000
+      });
+      return result.members?.includes(userId) ?? false;
+    } catch (error) {
+      // Channel not found or bot not in channel
+      return false;
+    }
+  }
+
+  // Middleware for all file operations
+  async assertAccess(userId: string, project: Project): Promise<void> {
+    const hasAccess = await this.canAccessProject(userId, project);
+    if (!hasAccess) {
+      throw new AccessDeniedError(
+        `You don't have access to this project. Join #${project.hubChannelId} to access its files.`
+      );
+    }
+  }
+}
+```
+
+### Access Rules
+
+| Action | Requirement |
+|--------|-------------|
+| View file list | Member of project hub channel |
+| Download file | Member of project hub channel |
+| Check out file | Member of project hub channel |
+| Check in file | Member of hub + holds the lock |
+| Share file (create reference) | Member of project hub channel |
+| View reference card | Member of project hub channel |
+| Initialize new project | Any channel member (becomes hub) |
+
+### Reference Card Visibility
+
+When someone not in the project hub encounters a reference card:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  🔒 *Confidential File*                                      │
+│  You don't have access to this project.                      │
+│  Contact the file owner for access.                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Sharing Restrictions
+
+Files can only be shared via reference cards to channels where:
+1. The sharer is a member of both the hub and target channel
+2. OR the target channel has overlapping membership with the hub (configurable)
+
+This prevents accidentally leaking file info to unauthorized channels.
 
 ---
 
@@ -233,16 +379,17 @@ productinventor/
 │   ├── config/
 │   │   └── index.ts
 │   ├── services/
+│   │   ├── project.service.ts    # Project/hub management
+│   │   ├── access.service.ts     # Channel-based access control
+│   │   ├── storage.service.ts    # Content-addressed file storage
 │   │   ├── file.service.ts       # File operations
 │   │   ├── lock.service.ts       # Lock management
-│   │   ├── git-lfs.service.ts    # Git LFS operations
-│   │   ├── version.service.ts    # Version history
 │   │   ├── user.service.ts       # User management
 │   │   ├── hub.service.ts        # File Hub message management
 │   │   └── reference.service.ts  # Reference card management
 │   ├── listeners/
 │   │   ├── commands/
-│   │   │   ├── files.ts          # /files command
+│   │   │   ├── files.ts          # /files command (init, list, upload)
 │   │   │   └── share.ts          # /share command (create reference)
 │   │   ├── actions/
 │   │   │   ├── checkout.ts       # Checkout handler
@@ -250,21 +397,25 @@ productinventor/
 │   │   │   ├── download.ts       # Download handlers
 │   │   │   └── reference.ts      # Reference card actions
 │   │   └── views/
-│   │       └── checkin-modal.ts  # Check-in modal
+│   │       ├── checkin-modal.ts  # Check-in modal
+│   │       └── upload-modal.ts   # Upload new file modal
 │   ├── blocks/
 │   │   ├── hub-file.blocks.ts    # Hub file card (master)
 │   │   ├── reference.blocks.ts   # Reference card (shared)
 │   │   ├── file-list.blocks.ts   # File browser list
+│   │   ├── access-denied.blocks.ts
 │   │   ├── checkin-modal.blocks.ts
 │   │   └── version-history.blocks.ts
 │   ├── utils/
-│   │   ├── git.ts
+│   │   ├── hash.ts               # SHA256 hashing utilities
 │   │   ├── slack.ts              # Slack message helpers
 │   │   └── errors.ts
 │   └── types/
 │       └── index.ts
-└── lfs-storage/                  # Git LFS repository
-    └── .git/lfs/objects/
+└── storage/                      # Content-addressed file storage
+    └── ab/
+        └── cd/
+            └── abcd1234...       # Files named by SHA256 hash
 ```
 
 ---
@@ -429,6 +580,62 @@ When a file is shared elsewhere via `/share filename`:
 
 ## Core Service Logic
 
+### Storage Service (Content-Addressed)
+
+```typescript
+import * as crypto from 'crypto';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
+class StorageService {
+  constructor(private basePath: string = '/var/files') {}
+
+  // Store file and return its content hash
+  async store(filePath: string): Promise<{ hash: string; size: number }> {
+    const hash = await this.hashFile(filePath);
+    const destPath = this.getPath(hash);
+    const stats = await fs.stat(filePath);
+
+    // Only copy if not already stored (deduplication)
+    if (!await this.exists(hash)) {
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.copyFile(filePath, destPath);
+    }
+
+    return { hash, size: stats.size };
+  }
+
+  // Get filesystem path for a content hash
+  getPath(hash: string): string {
+    return path.join(this.basePath, hash.slice(0, 2), hash.slice(2, 4), hash);
+  }
+
+  // Check if content exists
+  async exists(hash: string): Promise<boolean> {
+    try {
+      await fs.access(this.getPath(hash));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Delete content (only if no versions reference it)
+  async delete(hash: string): Promise<void> {
+    await fs.unlink(this.getPath(hash));
+  }
+
+  private async hashFile(filePath: string): Promise<string> {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    for await (const chunk of stream) {
+      hash.update(chunk);
+    }
+    return hash.digest('hex');
+  }
+}
+```
+
 ### Lock Service
 
 ```typescript
@@ -455,20 +662,28 @@ class LockService {
 }
 ```
 
-### File Service Checkout Flow
+### File Service
 
 ```typescript
 class FileService {
-  async checkoutFile(fileId: string, userId: string): Promise<{ file: File; downloadUrl: string }> {
+  constructor(
+    private prisma: PrismaClient,
+    private storage: StorageService,
+    private lockService: LockService,
+    private hubService: HubService,
+    private referenceService: ReferenceService
+  ) {}
+
+  async checkoutFile(fileId: string, userId: string): Promise<{ file: File; filePath: string }> {
     const file = await this.prisma.file.findUnique({ where: { id: fileId } });
     if (!file) throw new FileNotFoundError();
 
     // Acquire lock (throws if locked by another)
     await this.lockService.acquireLock(fileId, userId);
 
-    // Generate download URL
-    const downloadUrl = await this.generateSignedUrl(file);
-    return { file, downloadUrl };
+    // Return path to file content
+    const filePath = this.storage.getPath(file.contentHash);
+    return { file, filePath };
   }
 
   async checkinFile(fileId: string, userId: string, uploadedFilePath: string, message?: string): Promise<FileVersion> {
@@ -478,15 +693,25 @@ class FileService {
       throw new UnauthorizedError('You must have the file checked out');
     }
 
-    // Store in Git LFS
-    const { oid, commitSha } = await this.gitLfs.storeFile(uploadedFilePath, file.name, userId, message);
+    // Store in content-addressed storage
+    const { hash, size } = await this.storage.store(uploadedFilePath);
 
     // Transaction: create version + update file + release lock
     const version = await this.prisma.$transaction(async (tx) => {
       const version = await tx.fileVersion.create({
-        data: { fileId, versionNumber: file.currentVersion + 1, lfsOid: oid, commitSha, uploadedById: userId, message }
+        data: {
+          fileId,
+          versionNumber: file.currentVersion + 1,
+          contentHash: hash,
+          sizeBytes: size,
+          uploadedById: userId,
+          message
+        }
       });
-      await tx.file.update({ where: { id: fileId }, data: { lfsOid: oid, currentVersion: file.currentVersion + 1 } });
+      await tx.file.update({
+        where: { id: fileId },
+        data: { contentHash: hash, sizeBytes: size, currentVersion: file.currentVersion + 1 }
+      });
       await tx.fileLock.delete({ where: { fileId } });
       return version;
     });
@@ -496,6 +721,20 @@ class FileService {
     await this.referenceService.updateAllReferences(fileId);
 
     return version;
+  }
+
+  // Download a specific version
+  async getVersionPath(fileId: string, versionNumber?: number): Promise<string> {
+    const file = await this.prisma.file.findUnique({
+      where: { id: fileId },
+      include: { versions: true }
+    });
+
+    const version = versionNumber
+      ? file.versions.find(v => v.versionNumber === versionNumber)
+      : file.versions.find(v => v.versionNumber === file.currentVersion);
+
+    return this.storage.getPath(version.contentHash);
   }
 }
 ```
@@ -627,10 +866,12 @@ class ReferenceService {
 
 ## Slack Command & Action Handlers
 
-### `/files` Command
+### `/files` Command (Multi-purpose)
+
+The `/files` command works differently based on context and arguments:
 
 ```typescript
-app.command('/files', async ({ command, ack, respond }) => {
+app.command('/files', async ({ command, ack, respond, client }) => {
   await ack();
 
   const user = await userService.findOrCreateFromSlack({
@@ -638,14 +879,84 @@ app.command('/files', async ({ command, ack, respond }) => {
     slackTeamId: command.team_id
   });
 
-  const files = await fileService.listFiles();
+  const args = command.text.trim().split(' ');
+  const subcommand = args[0]?.toLowerCase();
+
+  // /files init - Initialize this channel as a project hub
+  if (subcommand === 'init') {
+    const projectName = args.slice(1).join(' ') || `Project ${command.channel_name}`;
+
+    // Check if channel is already a hub
+    const existingProject = await projectService.findByChannel(command.channel_id);
+    if (existingProject) {
+      await respond({ response_type: 'ephemeral', text: `This channel is already a file hub for "${existingProject.name}"` });
+      return;
+    }
+
+    // Create new project
+    const project = await projectService.create({
+      name: projectName,
+      hubChannelId: command.channel_id,
+      slackTeamId: command.team_id,
+      createdById: user.id
+    });
+
+    await respond({
+      response_type: 'in_channel',
+      text: `📁 *File Hub Initialized*\n\nThis channel is now the file hub for *${project.name}*.\n\nUse \`/files\` to browse files, \`/files upload\` to add files.`
+    });
+    return;
+  }
+
+  // For all other commands, find the project for this channel
+  const project = await projectService.findByChannel(command.channel_id);
+
+  if (!project) {
+    // Not in a hub - show user's accessible projects
+    const accessibleProjects = await projectService.findAccessibleByUser(command.user_id);
+
+    if (accessibleProjects.length === 0) {
+      await respond({
+        response_type: 'ephemeral',
+        text: `No file hubs found. Use \`/files init [project name]\` in a channel to create one.`
+      });
+    } else {
+      await respond({
+        response_type: 'ephemeral',
+        blocks: buildProjectListBlocks(accessibleProjects)
+      });
+    }
+    return;
+  }
+
+  // /files upload - Open upload modal
+  if (subcommand === 'upload') {
+    await client.views.open({
+      trigger_id: command.trigger_id,
+      view: buildUploadModal(project)
+    });
+    return;
+  }
+
+  // /files (no args) - List files in this project
+  const files = await fileService.listByProject(project.id);
 
   await respond({
     response_type: 'ephemeral',
-    blocks: buildFileListBlocks(files, user.id)
+    blocks: buildFileListBlocks(project, files, user.id)
   });
 });
 ```
+
+### Command Summary
+
+| Command | Context | Action |
+|---------|---------|--------|
+| `/files init [name]` | Any channel | Make this channel a project file hub |
+| `/files` | In a hub | List all files in this project |
+| `/files` | Outside hub | Show list of accessible projects |
+| `/files upload` | In a hub | Open upload modal for new file |
+| `/share <filename>` | Any channel | Share a file as reference card |
 
 ### `/share` Command (Create Reference Card)
 
@@ -653,17 +964,51 @@ app.command('/files', async ({ command, ack, respond }) => {
 app.command('/share', async ({ command, ack, respond, client }) => {
   await ack();
 
-  const fileName = command.text.trim();
-  if (!fileName) {
-    await respond({ response_type: 'ephemeral', text: 'Usage: /share <filename>' });
+  const args = command.text.trim();
+  if (!args) {
+    await respond({ response_type: 'ephemeral', text: 'Usage: /share <filename> or /share <project>:<filename>' });
     return;
   }
 
   const user = await userService.findBySlackId(command.user_id);
-  const file = await fileService.findByName(fileName);
+
+  // Parse project:filename or just filename
+  let projectName: string | undefined;
+  let fileName: string;
+
+  if (args.includes(':')) {
+    [projectName, fileName] = args.split(':');
+  } else {
+    fileName = args;
+  }
+
+  // Find the file
+  let file: File | null;
+
+  if (projectName) {
+    // Explicit project specified
+    const project = await projectService.findByName(projectName);
+    if (!project) {
+      await respond({ response_type: 'ephemeral', text: `Project not found: ${projectName}` });
+      return;
+    }
+    file = await fileService.findByNameInProject(fileName, project.id);
+  } else {
+    // Search across accessible projects
+    file = await fileService.findByNameWithAccess(fileName, command.user_id);
+  }
 
   if (!file) {
     await respond({ response_type: 'ephemeral', text: `File not found: ${fileName}` });
+    return;
+  }
+
+  // Check user has access to this file's project
+  const project = await projectService.findById(file.projectId);
+  const hasAccess = await accessService.canAccessProject(command.user_id, project);
+
+  if (!hasAccess) {
+    await respond({ response_type: 'ephemeral', text: `You don't have access to this file's project.` });
     return;
   }
 
@@ -672,13 +1017,12 @@ app.command('/share', async ({ command, ack, respond, client }) => {
     file.id,
     user.id,
     command.channel_id,
-    command.thread_ts  // If in a thread, post to thread
+    command.thread_ts
   );
 
-  // Ephemeral confirmation
   await respond({
     response_type: 'ephemeral',
-    text: `Shared ${file.name} (v${file.currentVersion}) in this channel`
+    text: `Shared ${file.name} (v${file.currentVersion}) from ${project.name}`
   });
 });
 ```
@@ -740,14 +1084,8 @@ SLACK_APP_TOKEN=xapp-your-app-token
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/file_checkout
 
-# Git LFS Repository Path
-LFS_REPO_PATH=/path/to/lfs-storage
-
-# Optional: S3 for LFS object storage
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_S3_BUCKET=file-checkout-lfs
-AWS_REGION=us-east-1
+# File Storage
+STORAGE_PATH=/var/files              # Content-addressed storage directory
 
 # App Settings
 NODE_ENV=development
@@ -761,39 +1099,45 @@ LOCK_EXPIRY_HOURS=24
 
 ### Phase 1: Project Setup
 - Initialize Node.js/TypeScript project with Bolt.js
-- Create Slack App with required OAuth scopes (`commands`, `chat:write`, `chat:write.public`, `files:read`, `users:read`)
+- Create Slack App with required OAuth scopes (`commands`, `chat:write`, `chat:write.public`, `files:read`, `users:read`, `channels:read`, `groups:read`)
 - Set up PostgreSQL database with Prisma
-- Initialize Git LFS repository
-- Create `#files` hub channel
+- Create content-addressed storage directory structure
 
-### Phase 2: Core Services
-- Implement Git LFS service (store, retrieve, version history)
-- Implement Lock service (acquire, release, expiration)
-- Implement File service (list, checkout, checkin)
+### Phase 2: Multi-Project Foundation
+- Implement Project service (create, find by channel, list accessible)
+- Implement Access service (channel membership checks)
 - Implement User service (Slack identity mapping)
+- Build `/files init` command to create project hubs
 
-### Phase 3: Hub & Reference System
+### Phase 3: Core File Services
+- Implement Storage service (content-addressed: store, retrieve by hash)
+- Implement Lock service (acquire, release, expiration)
+- Implement File service (list by project, checkout, checkin)
+- Build `/files` and `/files upload` commands
+
+### Phase 4: Hub & Reference System
 - Implement Hub service (create/update hub messages, post thread activity)
 - Implement Reference service (share files, update reference cards)
 - Build hub file card Block Kit UI
 - Build reference card Block Kit UI with staleness indicators
+- Add access-denied card for unauthorized viewers
 
-### Phase 4: Slack Commands & Actions
-- Build `/files` command with file list UI
-- Build `/share` command for creating reference cards
-- Implement checkout/download button actions
+### Phase 5: Slack Commands & Actions
+- Build `/share` command with project-aware file lookup
+- Implement checkout/download button actions with access checks
 - Build check-in modal with file upload
 - Implement version history view
-- Add "View in #files" deep-linking
+- Add "View in #project-files" deep-linking
 
-### Phase 5: File Transfer
+### Phase 6: File Transfer
 - Implement secure file download with signed URLs
 - Handle file upload from Slack
-- Process and store in Git LFS
+- Process and store in content-addressed storage
 
-### Phase 6: Polish & Deploy
+### Phase 7: Polish & Deploy
 - Error handling and edge cases
 - Reference card cleanup (deleted messages)
+- Access control edge cases (user removed from channel)
 - Unit and integration tests
 - Docker containerization
 - Deployment and monitoring
@@ -815,8 +1159,9 @@ LOCK_EXPIRY_HOURS=24
 
 | Challenge | Mitigation |
 |-----------|------------|
-| Large file uploads (>1GB) | External upload flow with signed S3 URLs |
+| Large file uploads (>1GB) | Chunked upload flow; streaming to disk |
 | Lock conflicts | Clear UI showing who has locks; admin override |
-| Git LFS storage growth | Garbage collection; archive old versions |
+| Storage growth | Garbage collection for unreferenced hashes; archive old versions |
 | Concurrent operations | Database transactions with row locking |
 | Slack API rate limits | Exponential backoff; batch operations |
+| Disk space monitoring | Alerts when storage approaches capacity |
