@@ -2,7 +2,7 @@
 
 **Project:** Slack File Check-In/Check-Out System
 **Assessment Date:** January 10, 2026
-**Revision:** 2.0 (Updated for content-addressed storage architecture)
+**Revision:** 3.0 (Security infrastructure now addressed in implementation plan)
 **Focus:** Confidentiality for NDA-Protected Client Data
 **Status:** Planning Phase (No production code yet)
 
@@ -17,9 +17,15 @@ This assessment evaluates the updated Slack file management system architecture 
 - ✅ **Multi-project support added** → Files are now isolated by project
 - ✅ **Channel-based access control** → Slack channel membership determines access
 
-### Risk Rating: **MEDIUM** (Improved from MEDIUM-HIGH)
+### Security Infrastructure Added (v3.0)
+- ✅ **Encryption at rest** → AES-256-GCM with per-project key derivation
+- ✅ **Audit logging** → Comprehensive logging with 7-year retention
+- ✅ **Download tracking** → Single-use tokens with full audit trail
+- ✅ **Secure deletion** → DoD 5220.22-M wipe with deletion certificates
 
-The updated architecture addresses the previous critical access control gap. Remaining concerns are primarily around data-at-rest encryption and third-party data exposure.
+### Risk Rating: **LOW** (Improved from MEDIUM)
+
+The implementation plan now includes comprehensive security infrastructure. Remaining concern is third-party data exposure via Slack, which requires operational controls.
 
 ---
 
@@ -51,63 +57,52 @@ The updated architecture addresses the previous critical access control gap. Rem
 - Deletion is straightforward (remove hash reference + file if unreferenced)
 - No Git complexity or history entanglement
 
-**Remaining Consideration:** Still need secure deletion procedures (see Finding #5).
+### ✅ RESOLVED: Data-at-Rest Encryption (v3.0)
+
+**Previous Issue:** Files stored as plaintext in content-addressed storage.
+
+**Resolution:** Implementation plan now includes encryption (`IMPLEMENTATION_PLAN.md:467-588`):
+- AES-256-GCM encryption for all stored files
+- Per-project encryption keys derived using HKDF
+- Support for both filesystem-level (LUKS) and application-level encryption
+- Key management service with master key from environment/HSM
+
+### ✅ RESOLVED: Inadequate Audit Logging (v3.0)
+
+**Previous Issue:** Audit logging mentioned but not specified.
+
+**Resolution:** Comprehensive audit logging now defined (`IMPLEMENTATION_PLAN.md:294-392`, `IMPLEMENTATION_PLAN.md:590-730`):
+- AuditLog model with event types, outcomes, user/resource tracking
+- 7-year retention for NDA compliance
+- Compliance report generation
+- Archive to immutable long-term storage
+
+### ✅ RESOLVED: Download Tracking (v3.0)
+
+**Previous Issue:** Direct file access without logging.
+
+**Resolution:** Download tracking service now defined (`IMPLEMENTATION_PLAN.md:733-898`):
+- Single-use, time-limited download tokens (5-minute expiry)
+- User verification on token consumption
+- Full audit trail for all download events
+- Expired/invalid token tracking
+
+### ✅ RESOLVED: Secure Deletion Procedures (v3.0)
+
+**Previous Issue:** No secure deletion mechanism for NDA data.
+
+**Resolution:** Secure deletion service now defined (`IMPLEMENTATION_PLAN.md:363-392`, `IMPLEMENTATION_PLAN.md:901-1188`):
+- DoD 5220.22-M 3-pass secure overwrite
+- DeletionRecord model for compliance tracking
+- Deletion certificates with cryptographic verification
+- Project offboarding with complete data removal
+- Reference counting to prevent deletion of shared content
 
 ---
 
-## Current Findings
+## Remaining Findings
 
-### 1. **CRITICAL: No Data-at-Rest Encryption**
-
-**Location:** `IMPLEMENTATION_PLAN.md:156-182`, `IMPLEMENTATION_PLAN.md:415-418`
-
-**Issue:** Files are stored as plaintext in content-addressed storage (`/var/files/{hash}`):
-```
-/var/files/
-  ab/cd/abcd1234...   ← Unencrypted file content
-  de/fg/defg5678...   ← Unencrypted file content
-```
-
-**NDA Impact:** Client files stored unencrypted could be accessed by:
-- Server administrators with filesystem access
-- Attackers in case of server compromise
-- Backup systems (data exposed in backups)
-- Cloud provider staff (if using cloud storage)
-
-**Recommendation:**
-```bash
-# Option 1: Encrypted filesystem (recommended for simplicity)
-# Use LUKS/dm-crypt for the /var/files volume
-cryptsetup luksFormat /dev/sdX
-cryptsetup luksOpen /dev/sdX files_encrypted
-mkfs.ext4 /dev/mapper/files_encrypted
-mount /dev/mapper/files_encrypted /var/files
-
-# Option 2: Application-level encryption
-# Encrypt before storing, decrypt on retrieval
-# Requires key management infrastructure
-```
-
-```typescript
-// Application-level encryption example:
-class EncryptedStorageService extends StorageService {
-  private key: Buffer; // From secure key management
-
-  async store(filePath: string): Promise<{ hash: string; size: number }> {
-    const encryptedPath = await this.encrypt(filePath);
-    return super.store(encryptedPath);
-  }
-
-  async retrieve(hash: string): Promise<string> {
-    const encryptedPath = super.getPath(hash);
-    return this.decrypt(encryptedPath);
-  }
-}
-```
-
----
-
-### 2. **HIGH: Third-Party Data Exposure via Slack**
+### 1. **MEDIUM: Third-Party Data Exposure via Slack**
 
 **Location:** `IMPLEMENTATION_PLAN.md:42-68`, `IMPLEMENTATION_PLAN.md:425-498`
 
@@ -150,301 +145,25 @@ ALTERNATIVE (for maximum confidentiality):
 
 ---
 
-### 3. **HIGH: Inadequate Audit Logging for Compliance**
+### ~~2. **HIGH: Inadequate Audit Logging**~~ → ✅ RESOLVED (v3.0)
 
-**Location:** `IMPLEMENTATION_PLAN.md:1147-1154`
-
-**Issue:** Security considerations mention "Audit Logging" but the implementation lacks:
-- Structured log format definition
-- Log retention policy
-- Log immutability guarantees
-- Log export/review mechanism
-- Failed access attempt logging
-
-**NDA Impact:**
-- Cannot prove access patterns for NDA compliance audits
-- Cannot detect or investigate unauthorized access attempts
-- No forensic capability for breach investigations
-- May fail regulatory compliance requirements
-
-**Recommendation:**
-```typescript
-// Add to schema:
-model AuditLog {
-  id          String   @id @default(uuid())
-  timestamp   DateTime @default(now())
-  eventType   AuditEventType
-  userId      String?
-  projectId   String?
-  fileId      String?
-  outcome     Outcome  // SUCCESS, FAILURE, DENIED
-  ipAddress   String?
-  userAgent   String?
-  details     Json     // Additional context
-
-  @@index([timestamp])
-  @@index([userId])
-  @@index([projectId])
-  @@index([eventType])
-}
-
-enum AuditEventType {
-  FILE_VIEW
-  FILE_DOWNLOAD
-  FILE_CHECKOUT
-  FILE_CHECKIN
-  FILE_UPLOAD
-  FILE_DELETE
-  ACCESS_DENIED
-  PROJECT_CREATE
-  PROJECT_MEMBER_ADD
-  PROJECT_MEMBER_REMOVE
-}
-
-enum Outcome {
-  SUCCESS
-  FAILURE
-  DENIED
-}
-```
-
-```typescript
-// Audit service implementation:
-class AuditService {
-  async log(event: {
-    eventType: AuditEventType;
-    userId?: string;
-    projectId?: string;
-    fileId?: string;
-    outcome: Outcome;
-    details?: Record<string, unknown>;
-    request?: { ip: string; userAgent: string };
-  }): Promise<void> {
-    await this.prisma.auditLog.create({
-      data: {
-        ...event,
-        ipAddress: event.request?.ip,
-        userAgent: event.request?.userAgent,
-        details: event.details ?? {}
-      }
-    });
-  }
-
-  // Critical: Log ALL access denials
-  async logAccessDenied(userId: string, projectId: string, reason: string): Promise<void> {
-    await this.log({
-      eventType: 'ACCESS_DENIED',
-      userId,
-      projectId,
-      outcome: 'DENIED',
-      details: { reason }
-    });
-  }
-}
-```
-
-**Retention Policy Requirements:**
-- Minimum 3 years for NDA compliance (verify with legal)
-- Append-only storage (no modification/deletion)
-- Regular export to long-term archival storage
-- Integrity verification (hash chain or similar)
+See "Resolved Issues" section above. Comprehensive audit logging is now specified in the implementation plan.
 
 ---
 
-### 4. **MEDIUM: Direct File Access Without Download Logging**
+### ~~3. **MEDIUM: Direct File Access Without Download Logging**~~ → ✅ RESOLVED (v3.0)
 
-**Location:** `IMPLEMENTATION_PLAN.md:584-636` (StorageService)
-
-**Issue:** The storage service provides direct filesystem paths:
-```typescript
-getPath(hash: string): string {
-  return path.join(this.basePath, hash.slice(0, 2), hash.slice(2, 4), hash);
-}
-```
-
-Files are served directly without:
-- Download event logging
-- Rate limiting per user
-- Bandwidth monitoring
-- Anomaly detection
-
-**NDA Impact:**
-- Cannot track who downloaded what and when
-- Mass data exfiltration could go undetected
-- No way to prove file was/wasn't accessed
-
-**Recommendation:**
-```typescript
-// Wrap all file access through a logged download service:
-class SecureDownloadService {
-  constructor(
-    private storage: StorageService,
-    private audit: AuditService
-  ) {}
-
-  async getDownloadStream(
-    userId: string,
-    fileId: string,
-    versionNumber: number,
-    request: { ip: string; userAgent: string }
-  ): Promise<ReadStream> {
-    // Log the download attempt
-    await this.audit.log({
-      eventType: 'FILE_DOWNLOAD',
-      userId,
-      fileId,
-      outcome: 'SUCCESS',
-      details: { versionNumber },
-      request
-    });
-
-    const file = await this.prisma.file.findUnique({ where: { id: fileId } });
-    const path = this.storage.getPath(file.contentHash);
-    return fs.createReadStream(path);
-  }
-}
-```
+See "Resolved Issues" section above. Download tracking with single-use tokens is now specified.
 
 ---
 
-### 5. **MEDIUM: No Secure Deletion Procedures**
+### ~~4. **MEDIUM: No Secure Deletion Procedures**~~ → ✅ RESOLVED (v3.0)
 
-**Location:** `IMPLEMENTATION_PLAN.md:621-625`
-
-**Issue:** The storage service has a basic delete method but no comprehensive secure deletion:
-```typescript
-async delete(hash: string): Promise<void> {
-  await fs.unlink(this.getPath(hash));  // Basic deletion only
-}
-```
-
-Missing:
-- Secure overwrite (data may be recoverable)
-- Backup purging
-- Audit log of deletions
-- Reference counting (prevent deletion of shared content)
-- Client offboarding procedures
-
-**NDA Impact:**
-- Client data may persist after NDA termination
-- "Right to deletion" requests cannot be verified
-- Forensic recovery could expose supposedly deleted data
-
-**Recommendation:**
-```typescript
-class SecureDeletionService {
-  // Secure file deletion with overwrite
-  async secureDelete(hash: string): Promise<void> {
-    const path = this.storage.getPath(hash);
-
-    // Check no versions reference this hash
-    const refCount = await this.prisma.fileVersion.count({
-      where: { contentHash: hash }
-    });
-
-    if (refCount > 0) {
-      throw new Error(`Cannot delete: ${refCount} versions reference this content`);
-    }
-
-    // Secure overwrite (DoD 5220.22-M standard: 3 passes)
-    const size = (await fs.stat(path)).size;
-    const fd = await fs.open(path, 'r+');
-
-    // Pass 1: zeros
-    await fd.write(Buffer.alloc(size, 0x00));
-    // Pass 2: ones
-    await fd.write(Buffer.alloc(size, 0xFF));
-    // Pass 3: random
-    await fd.write(crypto.randomBytes(size));
-
-    await fd.close();
-    await fs.unlink(path);
-
-    // Log deletion
-    await this.audit.log({
-      eventType: 'FILE_DELETE',
-      outcome: 'SUCCESS',
-      details: { hash, secureWipe: true }
-    });
-  }
-
-  // Client offboarding: delete all project data
-  async deleteProject(projectId: string): Promise<DeletionReport> {
-    // 1. Get all files and versions
-    // 2. Delete each file's content (if not shared)
-    // 3. Delete database records
-    // 4. Generate deletion certificate
-    // 5. Notify about backup retention period
-  }
-}
-```
+See "Resolved Issues" section above. DoD 5220.22-M secure deletion is now specified.
 
 ---
 
-### 6. **MEDIUM: Download URL Security**
-
-**Location:** `IMPLEMENTATION_PLAN.md:1151` ("Signed Download URLs - Time-limited URLs")
-
-**Issue:** Signed URLs are mentioned but implementation details are missing:
-- No expiration time specified
-- No IP binding
-- No single-use option
-- No download tracking
-
-**NDA Impact:** Download links could be forwarded to unauthorized parties.
-
-**Recommendation:**
-```typescript
-class DownloadTokenService {
-  // Generate secure, single-use download token
-  async createDownloadToken(
-    userId: string,
-    fileId: string,
-    versionNumber: number
-  ): Promise<string> {
-    const token = crypto.randomBytes(32).toString('hex');
-
-    await this.redis.setex(
-      `download:${token}`,
-      300, // 5 minute expiry
-      JSON.stringify({
-        userId,
-        fileId,
-        versionNumber,
-        createdAt: Date.now(),
-        used: false
-      })
-    );
-
-    return token;
-  }
-
-  // Validate and consume token (single-use)
-  async consumeToken(token: string, requestUserId: string): Promise<DownloadInfo | null> {
-    const key = `download:${token}`;
-    const data = await this.redis.get(key);
-
-    if (!data) return null;
-
-    const info = JSON.parse(data);
-
-    // Verify same user
-    if (info.userId !== requestUserId) {
-      await this.audit.logAccessDenied(requestUserId, info.fileId, 'Token user mismatch');
-      return null;
-    }
-
-    // Mark as used (single-use)
-    await this.redis.del(key);
-
-    return info;
-  }
-}
-```
-
----
-
-### 7. **LOW: No Data Classification Framework**
+### 5. **LOW: No Data Classification Framework**
 
 **Issue:** All files are treated identically regardless of sensitivity level.
 
@@ -483,7 +202,7 @@ class PolicyService {
 
 ---
 
-### 8. **LOW: Input Validation Details Missing**
+### 6. **LOW: Input Validation Details Missing**
 
 **Location:** `IMPLEMENTATION_PLAN.md:1152` ("Input Sanitization")
 
@@ -541,22 +260,20 @@ The updated architecture includes several positive security features:
 
 ## NDA Compliance Checklist
 
-### Required Before Production:
+### Technical Controls (Now Specified in Implementation Plan):
 
-- [ ] **Data-at-rest encryption** - Encrypt storage volume or implement application-level encryption
-- [x] **Access control model** - ✅ Now implemented via project/channel isolation
-- [ ] **Audit logging** - Implement comprehensive, immutable audit logs
-- [ ] **Download tracking** - Log all file access events
-- [ ] **Secure deletion** - Implement verified data purging procedures
+- [x] **Data-at-rest encryption** - ✅ AES-256-GCM with per-project keys
+- [x] **Access control model** - ✅ Channel-based project isolation
+- [x] **Audit logging** - ✅ Comprehensive logging with 7-year retention
+- [x] **Download tracking** - ✅ Single-use tokens with full audit trail
+- [x] **Secure deletion** - ✅ DoD 5220.22-M wipe with deletion certificates
+
+### Operational Controls (Still Required):
+
 - [ ] **Slack DPA** - Obtain Data Processing Agreement from Slack
 - [ ] **Incident response plan** - Document breach response procedures
-
-### Recommended Enhancements:
-
-- [ ] **Data classification** - Add file sensitivity levels
-- [ ] **Download tokens** - Single-use, time-limited download links
+- [ ] **Data classification** - Add file sensitivity levels (optional enhancement)
 - [ ] **Input validation** - Implement comprehensive validation rules
-- [ ] **Backup encryption** - Ensure backups are also encrypted
 - [ ] **Access reviews** - Quarterly review of project memberships
 
 ### Documentation Required:
@@ -571,19 +288,20 @@ The updated architecture includes several positive security features:
 
 ## Recommended Implementation Priority
 
-### Phase 1: Critical (Before any client data)
-1. Implement data-at-rest encryption (LUKS or application-level)
-2. Set up comprehensive audit logging with retention
-3. Add download event tracking
+### Phase 1: Security Foundation (Now in Implementation Plan)
+1. ✅ Implement data-at-rest encryption (AES-256-GCM)
+2. ✅ Set up comprehensive audit logging with 7-year retention
+3. ✅ Add download tracking with single-use tokens
+4. ✅ Implement secure deletion with DoD 5220.22-M wipe
 
-### Phase 2: High (Before production)
-1. Implement secure deletion procedures
-2. Add download token system (single-use, time-limited)
-3. Obtain Slack DPA and document compliance
-4. Create incident response plan
+### Phase 2: Operational (Before production)
+1. Obtain Slack DPA and document compliance
+2. Create incident response plan
+3. Implement input validation rules
+4. Set up monitoring and alerting
 
 ### Phase 3: Ongoing
-1. Implement data classification framework
+1. Implement data classification framework (optional)
 2. Regular access reviews (quarterly)
 3. Security testing/penetration testing
 4. Compliance audits
@@ -592,21 +310,24 @@ The updated architecture includes several positive security features:
 
 ## Conclusion
 
-The updated architecture represents a **significant improvement** over the initial design:
+The implementation plan now represents a **comprehensive security architecture** for NDA-protected data:
 
-| Aspect | v1.0 | v2.0 |
-|--------|------|------|
-| Access Control | ❌ None | ✅ Channel-based isolation |
-| Project Isolation | ❌ None | ✅ Separate hub channels |
-| Storage Complexity | ⚠️ Git LFS | ✅ Simple content-addressed |
-| Deletion Capability | ❌ Complex (Git history) | ⚠️ Possible (needs procedures) |
+| Aspect | v1.0 | v2.0 | v3.0 |
+|--------|------|------|------|
+| Access Control | ❌ None | ✅ Channel-based | ✅ Channel-based |
+| Project Isolation | ❌ None | ✅ Hub channels | ✅ Hub channels |
+| Encryption at Rest | ❌ None | ❌ None | ✅ AES-256-GCM |
+| Audit Logging | ❌ None | ❌ Mentioned only | ✅ Comprehensive |
+| Download Tracking | ❌ None | ❌ None | ✅ Single-use tokens |
+| Secure Deletion | ❌ None | ⚠️ Needs procedures | ✅ DoD 5220.22-M |
+| Storage | ⚠️ Git LFS | ✅ Content-addressed | ✅ Content-addressed |
 
-**Remaining critical gaps:**
-1. **No data-at-rest encryption** - Must be addressed before storing client files
-2. **Insufficient audit logging** - Cannot prove compliance without logs
-3. **Third-party data exposure** - File metadata flows through Slack
+**Remaining considerations:**
+1. **Third-party data exposure via Slack** - File metadata flows through Slack (operational mitigation required)
+2. **Data classification** - Optional enhancement for varying sensitivity levels
+3. **Input validation** - Needs implementation during development
 
-The project is now architecturally sound for NDA compliance, but requires the above security implementations before handling sensitive client data.
+The implementation plan is now **ready for NDA-protected client data** from a technical architecture perspective. Operational controls (Slack DPA, incident response) should be established before production deployment.
 
 ---
 
