@@ -1,5 +1,5 @@
 /**
- * Configuration management for the Slack file checkout system.
+ * Configuration management for EcoMetrics Sustainability Platform.
  *
  * Loads and validates environment variables, providing a typed configuration
  * object for the application. Throws errors if required variables are missing.
@@ -11,12 +11,50 @@
 export type EncryptionMode = 'standard' | 'encrypted';
 
 /**
- * Slack configuration
+ * AI provider options
+ */
+export type AIProvider = 'openai' | 'anthropic';
+
+/**
+ * Slack configuration (optional for sustainability platform)
  */
 export interface SlackConfig {
-  botToken: string;
-  signingSecret: string;
-  appToken: string;
+  botToken?: string;
+  signingSecret?: string;
+  appToken?: string;
+  webhookUrl?: string;
+}
+
+/**
+ * AI service configuration
+ */
+export interface AIConfig {
+  provider: AIProvider;
+  openaiApiKey?: string;
+  openaiModel: string;
+  anthropicApiKey?: string;
+  anthropicModel: string;
+  maxTokens: number;
+  temperature: number;
+}
+
+/**
+ * Sustainability configuration
+ */
+export interface SustainabilityConfig {
+  emissionFactorsVersion: string;
+  defaultGridIntensity: number;
+  dataQualityScoringEnabled: boolean;
+}
+
+/**
+ * Feature flags configuration
+ */
+export interface FeatureFlags {
+  supplyChainEnabled: boolean;
+  predictiveAnalyticsEnabled: boolean;
+  nlqEnabled: boolean;
+  esgReportingEnabled: boolean;
 }
 
 /**
@@ -79,6 +117,9 @@ export interface AppConfig {
  */
 export interface Config {
   slack: SlackConfig;
+  ai: AIConfig;
+  sustainability: SustainabilityConfig;
+  features: FeatureFlags;
   database: DatabaseConfig;
   redis: RedisConfig;
   storage: StorageConfig;
@@ -174,11 +215,51 @@ function parseMasterKey(base64Key: string): Buffer {
  * @throws Error if required variables are missing or invalid
  */
 function loadConfig(): Config {
-  // Load Slack configuration
+  // Load Slack configuration (optional)
   const slack: SlackConfig = {
-    botToken: getRequiredEnv('SLACK_BOT_TOKEN'),
-    signingSecret: getRequiredEnv('SLACK_SIGNING_SECRET'),
-    appToken: getRequiredEnv('SLACK_APP_TOKEN'),
+    botToken: process.env.SLACK_BOT_TOKEN,
+    signingSecret: process.env.SLACK_SIGNING_SECRET,
+    appToken: process.env.SLACK_APP_TOKEN,
+    webhookUrl: process.env.SLACK_WEBHOOK_URL,
+  };
+
+  // Load AI configuration
+  const aiProvider = getOptionalEnv('AI_PROVIDER', 'openai') as AIProvider;
+  if (aiProvider !== 'openai' && aiProvider !== 'anthropic') {
+    throw new Error('AI_PROVIDER must be either "openai" or "anthropic"');
+  }
+
+  const ai: AIConfig = {
+    provider: aiProvider,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+    openaiModel: getOptionalEnv('OPENAI_MODEL', 'gpt-4-turbo-preview'),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    anthropicModel: getOptionalEnv('ANTHROPIC_MODEL', 'claude-3-sonnet-20240229'),
+    maxTokens: getOptionalInt('AI_MAX_TOKENS', 4096),
+    temperature: parseFloat(getOptionalEnv('AI_TEMPERATURE', '0.7')),
+  };
+
+  // Validate that the selected provider has an API key
+  if (aiProvider === 'openai' && !ai.openaiApiKey) {
+    throw new Error('OPENAI_API_KEY is required when AI_PROVIDER is "openai"');
+  }
+  if (aiProvider === 'anthropic' && !ai.anthropicApiKey) {
+    throw new Error('ANTHROPIC_API_KEY is required when AI_PROVIDER is "anthropic"');
+  }
+
+  // Load sustainability configuration
+  const sustainability: SustainabilityConfig = {
+    emissionFactorsVersion: getOptionalEnv('EMISSION_FACTORS_VERSION', '2024.1'),
+    defaultGridIntensity: parseFloat(getOptionalEnv('DEFAULT_GRID_INTENSITY', '0.475')),
+    dataQualityScoringEnabled: getOptionalBool('DATA_QUALITY_SCORING_ENABLED', true),
+  };
+
+  // Load feature flags
+  const features: FeatureFlags = {
+    supplyChainEnabled: getOptionalBool('SUPPLY_CHAIN_ENABLED', true),
+    predictiveAnalyticsEnabled: getOptionalBool('PREDICTIVE_ANALYTICS_ENABLED', true),
+    nlqEnabled: getOptionalBool('NLQ_ENABLED', true),
+    esgReportingEnabled: getOptionalBool('ESG_REPORTING_ENABLED', true),
   };
 
   // Load database configuration
@@ -240,6 +321,9 @@ function loadConfig(): Config {
 
   return {
     slack,
+    ai,
+    sustainability,
+    features,
     database,
     redis,
     storage,
