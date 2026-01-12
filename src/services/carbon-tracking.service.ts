@@ -269,7 +269,7 @@ export class CarbonTrackingService {
       where: { id: organizationId },
     });
 
-    if (!org?.annualRevenue || org.annualRevenue <= 0) {
+    if (!org?.annualRevenue || Number(org.annualRevenue) <= 0) {
       return null;
     }
 
@@ -318,11 +318,11 @@ export class CarbonTrackingService {
     }
 
     // Recalculate total if activity data or emission factor changed
-    let totalEmissions = existing.totalEmissions;
+    let totalEmissions = Number(existing.totalEmissions);
     if (updates.activityData !== undefined || updates.emissionFactor !== undefined) {
-      const activityData = updates.activityData ?? existing.activityData;
-      const emissionFactor = updates.emissionFactor ?? existing.emissionFactor;
-      totalEmissions = activityData.mul(emissionFactor);
+      const activityData = Number(updates.activityData ?? existing.activityData);
+      const emissionFactor = Number(updates.emissionFactor ?? existing.emissionFactor);
+      totalEmissions = activityData * emissionFactor;
     }
 
     return this.prisma.emissionRecord.update({

@@ -1,13 +1,166 @@
 /**
  * Application Entry Point
  *
- * Initializes the Slack file checkout system, registers all listeners,
- * starts the application, and handles graceful shutdown.
+ * Initializes the EcoMetrics Sustainability Platform, connects to databases,
+ * and starts the application server.
  */
 
-import { app, prisma, redis, disconnectClients, connectRedis, services } from './app.js';
+import { prisma, redis, disconnectClients, connectRedis, services } from './app.js';
 import { config, validateConfig } from './config/index.js';
-// import { registerListeners } from './listeners/index.js';
+import express from 'express';
+
+const app = express();
+
+// Middleware
+app.use(express.json());
+
+// =============================================================================
+// Health Check Endpoint
+// =============================================================================
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    service: 'EcoMetrics Sustainability Platform',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// =============================================================================
+// API Routes
+// =============================================================================
+
+/**
+ * Query natural language endpoint
+ */
+app.post('/api/ai/query', async (req, res) => {
+  try {
+    const { organizationId, userId, query } = req.body;
+
+    if (!organizationId || !userId || !query) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const response = await services.ai.processQuery(organizationId, userId, { query });
+    res.json(response);
+  } catch (error) {
+    console.error('AI query error:', error);
+    res.status(500).json({ error: 'Failed to process query' });
+  }
+});
+
+/**
+ * Get sustainability insights
+ */
+app.post('/api/ai/insights', async (req, res) => {
+  try {
+    const { organizationId, userId, startDate, endDate } = req.body;
+
+    if (!organizationId || !userId) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const timeframe = startDate && endDate
+      ? { startDate: new Date(startDate), endDate: new Date(endDate) }
+      : undefined;
+
+    const insights = await services.ai.generateInsights(organizationId, userId, timeframe);
+    res.json({ insights });
+  } catch (error) {
+    console.error('Insights generation error:', error);
+    res.status(500).json({ error: 'Failed to generate insights' });
+  }
+});
+
+/**
+ * Get emission summary
+ */
+app.get('/api/emissions/summary/:organizationId', async (req, res) => {
+  try {
+    const { organizationId } = req.params;
+    const { startDate, endDate } = req.query;
+
+    const summary = await services.carbonTracking.getEmissionSummary(
+      organizationId,
+      startDate ? new Date(startDate as string) : undefined,
+      endDate ? new Date(endDate as string) : undefined
+    );
+
+    res.json(summary);
+  } catch (error) {
+    console.error('Emission summary error:', error);
+    res.status(500).json({ error: 'Failed to get emission summary' });
+  }
+});
+
+/**
+ * Create emission record
+ */
+app.post('/api/emissions', async (req, res) => {
+  try {
+    const { organizationId, userId, ...emissionData } = req.body;
+
+    if (!organizationId || !userId) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Parse dates
+    emissionData.startDate = new Date(emissionData.startDate);
+    emissionData.endDate = new Date(emissionData.endDate);
+
+    const record = await services.carbonTracking.createEmissionRecord(
+      organizationId,
+      userId,
+      emissionData
+    );
+
+    res.status(201).json(record);
+  } catch (error) {
+    console.error('Create emission error:', error);
+    res.status(500).json({ error: 'Failed to create emission record' });
+  }
+});
+
+/**
+ * Get sustainability goals
+ */
+app.get('/api/goals/:organizationId', async (req, res) => {
+  try {
+    const { organizationId } = req.params;
+    const { status } = req.query;
+
+    const goals = await services.sustainabilityGoals.getOrganizationGoals(
+      organizationId,
+      status as any
+    );
+
+    res.json({ goals });
+  } catch (error) {
+    console.error('Get goals error:', error);
+    res.status(500).json({ error: 'Failed to get goals' });
+  }
+});
+
+/**
+ * Create sustainability goal
+ */
+app.post('/api/goals', async (req, res) => {
+  try {
+    const { organizationId, ...goalData } = req.body;
+
+    if (!organizationId) {
+      return res.status(400).json({ error: 'Missing organizationId' });
+    }
+
+    const goal = await services.sustainabilityGoals.createGoal(organizationId, goalData);
+
+    res.status(201).json(goal);
+  } catch (error) {
+    console.error('Create goal error:', error);
+    res.status(500).json({ error: 'Failed to create goal' });
+  }
+});
 
 // =============================================================================
 // Startup
@@ -17,7 +170,7 @@ import { config, validateConfig } from './config/index.js';
  * Start the application.
  */
 async function start(): Promise<void> {
-  console.log('Starting Slack File Checkout System...');
+  console.log('Starting EcoMetrics Sustainability Platform...');
 
   // Validate configuration first
   try {
@@ -45,30 +198,35 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
-  // Register all Slack event listeners
-  // Note: Uncomment the import and the line below once listeners are implemented
-  // registerListeners(app, services);
-  console.log('Event listeners registration ready (uncomment when listeners are implemented)');
-
-  // Start the Bolt app
-  try {
-    await app.start();
+  // Start the HTTP server
+  const port = config.app.port;
+  app.listen(port, () => {
     console.log('');
     console.log('='.repeat(60));
-    console.log('Slack File Checkout System is running!');
+    console.log('EcoMetrics Sustainability Platform is running!');
     console.log('='.repeat(60));
     console.log(`Environment: ${config.app.nodeEnv}`);
-    console.log(`Port: ${config.app.port}`);
-    console.log(`Storage Path: ${config.storage.path}`);
-    console.log(`Encryption Mode: ${config.encryption.mode}`);
-    console.log(`Secure Delete: ${config.security.secureDeleteEnabled ? 'enabled' : 'disabled'}`);
-    console.log(`Lock Expiry: ${config.app.lockExpiryHours} hours`);
+    console.log(`Port: ${port}`);
+    console.log(`AI Provider: ${config.ai.provider}`);
+    console.log(`AI Model: ${config.ai.provider === 'openai' ? config.ai.openaiModel : config.ai.anthropicModel}`);
+    console.log(`Features Enabled:`);
+    console.log(`  - Supply Chain: ${config.features.supplyChainEnabled}`);
+    console.log(`  - Predictive Analytics: ${config.features.predictiveAnalyticsEnabled}`);
+    console.log(`  - Natural Language Queries: ${config.features.nlqEnabled}`);
+    console.log(`  - ESG Reporting: ${config.features.esgReportingEnabled}`);
     console.log('='.repeat(60));
     console.log('');
-  } catch (error) {
-    console.error('Failed to start Bolt app:', error);
-    process.exit(1);
-  }
+    console.log('API Endpoints:');
+    console.log(`  GET  /health - Health check`);
+    console.log(`  POST /api/ai/query - Natural language queries`);
+    console.log(`  POST /api/ai/insights - Generate sustainability insights`);
+    console.log(`  GET  /api/emissions/summary/:orgId - Get emission summary`);
+    console.log(`  POST /api/emissions - Create emission record`);
+    console.log(`  GET  /api/goals/:orgId - Get sustainability goals`);
+    console.log(`  POST /api/goals - Create sustainability goal`);
+    console.log('='.repeat(60));
+    console.log('');
+  });
 }
 
 // =============================================================================
@@ -86,20 +244,6 @@ async function handleShutdown(signal: string): Promise<void> {
   console.log(`Received ${signal}. Starting graceful shutdown...`);
 
   try {
-    // Stop accepting new connections
-    await app.stop();
-    console.log('Stopped accepting new connections');
-
-    // Clean up expired locks before shutdown
-    try {
-      const cleanedLocks = await services.lock.cleanupExpiredLocks();
-      if (cleanedLocks > 0) {
-        console.log(`Cleaned up ${cleanedLocks} expired locks`);
-      }
-    } catch (error) {
-      console.error('Error cleaning up locks:', error);
-    }
-
     // Disconnect clients
     await disconnectClients();
 

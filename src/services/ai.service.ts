@@ -40,7 +40,7 @@ export class AIService {
   private openaiClient?: OpenAI;
   private anthropicClient?: Anthropic;
   private provider: AIProvider;
-  private defaultModel: string;
+  private defaultModel: string = '';
   private defaultMaxTokens: number;
   private defaultTemperature: number;
 
@@ -316,13 +316,15 @@ Always provide citations and confidence levels for your recommendations.`;
    */
   private summarizeEmissionData(emissions: any[]): string {
     const totalEmissions = emissions.reduce((sum, e) => sum + Number(e.totalEmissions), 0);
-    const byScope = emissions.reduce((acc, e) => {
-      acc[e.scope] = (acc[e.scope] || 0) + Number(e.totalEmissions);
+    const byScope = emissions.reduce((acc: Record<string, number>, r: any) => {
+      const scope = r.scope as string;
+      acc[scope] = (acc[scope] || 0) + Number(r.totalEmissions);
       return acc;
     }, {} as Record<string, number>);
 
-    const byCategory = emissions.reduce((acc, e) => {
-      acc[e.category] = (acc[e.category] || 0) + Number(e.totalEmissions);
+    const byCategory = emissions.reduce((acc: Record<string, number>, r: any) => {
+      const category = r.category as string;
+      acc[category] = (acc[category] || 0) + Number(r.totalEmissions);
       return acc;
     }, {} as Record<string, number>);
 
@@ -330,13 +332,13 @@ Always provide citations and confidence levels for your recommendations.`;
 Number of Records: ${emissions.length}
 
 Emissions by Scope:
-${Object.entries(byScope).map(([scope, value]) => `  ${scope}: ${value.toFixed(2)} kg CO2e`).join('\n')}
+${Object.entries(byScope).map(([scope, value]) => `  ${scope}: ${(value as number).toFixed(2)} kg CO2e`).join('\n')}
 
 Top Emission Categories:
 ${Object.entries(byCategory)
-  .sort(([, a], [, b]) => b - a)
+  .sort(([, a], [, b]) => (b as number) - (a as number))
   .slice(0, 5)
-  .map(([cat, value]) => `  ${cat}: ${value.toFixed(2)} kg CO2e`)
+  .map(([cat, value]) => `  ${cat}: ${(value as number).toFixed(2)} kg CO2e`)
   .join('\n')}`;
   }
 
