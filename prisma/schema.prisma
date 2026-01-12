@@ -1,6 +1,5 @@
-// Prisma schema for Slack File Checkout System
-// This schema defines the data model for managing file uploads, versioning,
-// checkout locks, and comprehensive audit logging within Slack workspaces.
+// Prisma schema for EcoMetrics Sustainability Platform
+// AI-first sustainability tracking, carbon footprint monitoring, and ESG reporting
 
 generator client {
   provider = "prisma-client-js"
@@ -15,250 +14,462 @@ datasource db {
 // ENUMS
 // =============================================================================
 
+enum UserRole {
+  ADMIN
+  SUSTAINABILITY_MANAGER
+  ANALYST
+  VIEWER
+}
+
+enum OrganizationType {
+  ENTERPRISE
+  SMB
+  STARTUP
+  NON_PROFIT
+  GOVERNMENT
+}
+
+enum EmissionScope {
+  SCOPE_1    // Direct emissions
+  SCOPE_2    // Indirect emissions from purchased energy
+  SCOPE_3    // Other indirect emissions in value chain
+}
+
+enum EmissionCategory {
+  // Scope 1
+  STATIONARY_COMBUSTION
+  MOBILE_COMBUSTION
+  FUGITIVE_EMISSIONS
+  PROCESS_EMISSIONS
+  
+  // Scope 2
+  PURCHASED_ELECTRICITY
+  PURCHASED_HEAT
+  PURCHASED_STEAM
+  
+  // Scope 3
+  PURCHASED_GOODS_SERVICES
+  CAPITAL_GOODS
+  FUEL_ENERGY_ACTIVITIES
+  UPSTREAM_TRANSPORTATION
+  WASTE_GENERATED
+  BUSINESS_TRAVEL
+  EMPLOYEE_COMMUTING
+  UPSTREAM_LEASED_ASSETS
+  DOWNSTREAM_TRANSPORTATION
+  PROCESSING_SOLD_PRODUCTS
+  USE_SOLD_PRODUCTS
+  END_OF_LIFE_TREATMENT
+  DOWNSTREAM_LEASED_ASSETS
+  FRANCHISES
+  INVESTMENTS
+}
+
+enum DataQuality {
+  MEASURED      // Direct measurement
+  CALCULATED    // Calculated from primary data
+  ESTIMATED     // Estimated using industry averages
+  PROXY         // Proxy data from similar sources
+}
+
+enum GoalStatus {
+  DRAFT
+  ACTIVE
+  ACHIEVED
+  MISSED
+  CANCELLED
+}
+
+enum ReportType {
+  CARBON_FOOTPRINT
+  ESG_COMPREHENSIVE
+  GRI_STANDARD
+  SASB_STANDARD
+  TCFD_STANDARD
+  CDP_CLIMATE
+  CUSTOM
+}
+
+enum ReportStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  PUBLISHED
+}
+
 enum AuditEventType {
-  FILE_UPLOAD
-  FILE_DOWNLOAD
-  FILE_VIEW
-  FILE_CHECKOUT
-  FILE_CHECKIN
-  FILE_DELETE
-  FILE_RESTORE
-  ACCESS_GRANTED
-  ACCESS_DENIED
-  ACCESS_REVOKED
-  PROJECT_CREATE
-  PROJECT_DELETE
-  PROJECT_MEMBER_ADD
-  PROJECT_MEMBER_REMOVE
-  DOWNLOAD_TOKEN_CREATED
-  DOWNLOAD_TOKEN_USED
-  DOWNLOAD_TOKEN_EXPIRED
-  SECURE_DELETE_STARTED
-  SECURE_DELETE_COMPLETED
-  ADMIN_OVERRIDE
-  LOCK_FORCE_RELEASE
+  USER_LOGIN
+  USER_LOGOUT
+  DATA_CREATE
+  DATA_UPDATE
+  DATA_DELETE
+  DATA_EXPORT
+  REPORT_GENERATE
+  GOAL_CREATE
+  GOAL_UPDATE
+  AI_QUERY
+  API_ACCESS
+  PERMISSION_CHANGE
 }
 
-enum AuditOutcome {
-  SUCCESS
-  FAILURE
-  DENIED
-  PARTIAL
-}
-
-enum DeletionStatus {
-  PENDING
-  IN_PROGRESS
-  COMPLETED
-  FAILED
-  VERIFIED
+enum IntegrationType {
+  API
+  CSV_UPLOAD
+  EXCEL_UPLOAD
+  ERP_SYSTEM
+  IOT_SENSOR
+  CLOUD_PROVIDER
+  UTILITY_PROVIDER
 }
 
 // =============================================================================
-// MODELS
+// USER & ORGANIZATION MODELS
 // =============================================================================
 
-/// User - Slack user mapping
-/// Maps Slack users to internal user records for tracking ownership and actions
+model Organization {
+  id                String           @id @default(uuid())
+  name              String
+  type              OrganizationType
+  industry          String?
+  country           String
+  employeeCount     Int?
+  annualRevenue     Decimal?         @db.Decimal(15, 2)
+  website           String?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  // Relations
+  users             User[]
+  facilities        Facility[]
+  emissionRecords   EmissionRecord[]
+  goals             SustainabilityGoal[]
+  reports           Report[]
+  suppliers         Supplier[]
+  auditLogs         AuditLog[]
+  aiInteractions    AIInteraction[]
+  
+  @@index([name])
+}
+
 model User {
-  id          String   @id @default(cuid())
-  slackUserId String
-  slackTeamId String
-  displayName String
-  email       String?
-  avatarUrl   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
+  id                String           @id @default(uuid())
+  email             String           @unique
+  name              String
+  role              UserRole         @default(VIEWER)
+  organizationId    String
+  
+  // Authentication
+  passwordHash      String?
+  lastLogin         DateTime?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
   // Relations
-  createdProjects  Project[]       @relation("ProjectCreator")
-  uploadedVersions FileVersion[]   @relation("VersionUploader")
-  fileLocks        FileLock[]      @relation("LockOwner")
-  sharedReferences FileReference[] @relation("ReferenceSharer")
-  auditLogs        AuditLog[]      @relation("AuditUser")
-  deletionRequests DeletionRecord[] @relation("DeletionRequester")
-
-  @@unique([slackUserId, slackTeamId])
-  @@index([slackUserId])
-  @@index([slackTeamId])
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  emissionRecords   EmissionRecord[]
+  reports           Report[]
+  aiInteractions    AIInteraction[]
+  auditLogs         AuditLog[]
+  
+  @@index([organizationId])
+  @@index([email])
 }
 
-/// Project - File hub per channel
-/// Each Slack channel can have one project/file hub for organizing files
-model Project {
-  id           String   @id @default(cuid())
-  name         String
-  slackTeamId  String
-  hubChannelId String   @unique
-  createdById  String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+// =============================================================================
+// FACILITY & LOCATION MODELS
+// =============================================================================
 
+model Facility {
+  id                String           @id @default(uuid())
+  organizationId    String
+  name              String
+  address           String
+  city              String
+  state             String?
+  country           String
+  postalCode        String?
+  
+  // Geo coordinates for location-based carbon intensity
+  latitude          Decimal?         @db.Decimal(10, 8)
+  longitude         Decimal?         @db.Decimal(11, 8)
+  
+  // Facility details
+  facilityType      String?          // e.g., "office", "warehouse", "factory"
+  squareMeters      Decimal?         @db.Decimal(10, 2)
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
   // Relations
-  createdBy       User             @relation("ProjectCreator", fields: [createdById], references: [id])
-  files           File[]           @relation("ProjectFiles")
-  fileReferences  FileReference[]  @relation("ProjectReferences")
-  auditLogs       AuditLog[]       @relation("AuditProject")
-  deletionRecords DeletionRecord[] @relation("DeletionProject")
-
-  @@index([slackTeamId])
-  @@index([createdById])
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  emissionRecords   EmissionRecord[]
+  
+  @@index([organizationId])
 }
 
-/// File - Files in projects
-/// Represents a file within a project, tracking its current state and location
-model File {
-  id             String   @id @default(cuid())
-  projectId      String
-  name           String
-  path           String
-  contentHash    String
-  sizeBytes      BigInt
-  mimeType       String?
-  currentVersion Int      @default(1)
-  hubMessageTs   String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+// =============================================================================
+// EMISSION TRACKING MODELS
+// =============================================================================
 
+model EmissionRecord {
+  id                String           @id @default(uuid())
+  organizationId    String
+  facilityId        String?
+  userId            String
+  
+  // Emission details
+  scope             EmissionScope
+  category          EmissionCategory
+  activityData      Decimal          @db.Decimal(15, 4)  // e.g., kWh, liters, km
+  activityUnit      String           // e.g., "kWh", "L", "km"
+  emissionFactor    Decimal          @db.Decimal(15, 6)  // kg CO2e per unit
+  emissionFactorSource String?       // Source of emission factor
+  totalEmissions    Decimal          @db.Decimal(15, 4)  // kg CO2e
+  
+  // Data quality & source
+  dataQuality       DataQuality
+  source            String?          // Description of data source
+  referenceNumber   String?          // External reference (invoice #, etc.)
+  
+  // Time period
+  startDate         DateTime
+  endDate           DateTime
+  
+  // Additional details
+  description       String?
+  notes             String?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
   // Relations
-  project         Project         @relation("ProjectFiles", fields: [projectId], references: [id], onDelete: Cascade)
-  versions        FileVersion[]   @relation("FileVersions")
-  lock            FileLock?       @relation("FileLock")
-  references      FileReference[] @relation("FileReferences")
-  auditLogs       AuditLog[]      @relation("AuditFile")
-  deletionRecords DeletionRecord[] @relation("DeletionFile")
-
-  @@unique([projectId, path])
-  @@index([projectId])
-  @@index([contentHash])
-  @@index([hubMessageTs])
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  facility          Facility?        @relation(fields: [facilityId], references: [id])
+  user              User             @relation(fields: [userId], references: [id])
+  
+  @@index([organizationId])
+  @@index([facilityId])
+  @@index([scope])
+  @@index([category])
+  @@index([startDate, endDate])
 }
 
-/// FileVersion - Version history
-/// Tracks all versions of a file for history and rollback capabilities
-model FileVersion {
-  id            String   @id @default(cuid())
-  fileId        String
-  versionNumber Int
-  contentHash   String
-  sizeBytes     BigInt
-  uploadedById  String
-  message       String?
-  createdAt     DateTime @default(now())
+// =============================================================================
+// SUSTAINABILITY GOALS & TARGETS
+// =============================================================================
 
+model SustainabilityGoal {
+  id                String           @id @default(uuid())
+  organizationId    String
+  
+  // Goal details
+  name              String
+  description       String?
+  scope             EmissionScope?   // null means all scopes
+  
+  // Targets
+  baselineYear      Int
+  baselineValue     Decimal          @db.Decimal(15, 4)  // kg CO2e
+  targetYear        Int
+  targetValue       Decimal          @db.Decimal(15, 4)  // kg CO2e
+  reductionPercent  Decimal          @db.Decimal(5, 2)   // e.g., 50.00 for 50%
+  
+  // Status
+  status            GoalStatus       @default(ACTIVE)
+  currentValue      Decimal?         @db.Decimal(15, 4)  // Current emissions
+  progressPercent   Decimal?         @db.Decimal(5, 2)   // Progress toward goal
+  
+  // AI insights
+  aiRecommendations String?          // AI-generated recommendations
+  predictedAchievementDate DateTime?
+  riskLevel         String?          // "low", "medium", "high"
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
   // Relations
-  file       File       @relation("FileVersions", fields: [fileId], references: [id], onDelete: Cascade)
-  uploadedBy User       @relation("VersionUploader", fields: [uploadedById], references: [id])
-  auditLogs  AuditLog[] @relation("AuditFileVersion")
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([status])
+  @@index([targetYear])
+}
 
-  @@unique([fileId, versionNumber])
-  @@index([fileId])
-  @@index([uploadedById])
-  @@index([contentHash])
+// =============================================================================
+// SUPPLY CHAIN MODELS
+// =============================================================================
+
+model Supplier {
+  id                String           @id @default(uuid())
+  organizationId    String
+  
+  // Supplier information
+  name              String
+  country           String
+  industry          String?
+  
+  // Sustainability scoring
+  sustainabilityScore Decimal?       @db.Decimal(5, 2)  // 0-100
+  carbonIntensity   Decimal?         @db.Decimal(15, 6) // kg CO2e per $
+  lastAssessmentDate DateTime?
+  
+  // Certifications
+  certifications    String[]         // e.g., ["ISO 14001", "B Corp"]
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  // Relations
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+}
+
+// =============================================================================
+// REPORTING MODELS
+// =============================================================================
+
+model Report {
+  id                String           @id @default(uuid())
+  organizationId    String
+  userId            String
+  
+  // Report details
+  reportType        ReportType
+  title             String
+  description       String?
+  
+  // Time period
+  startDate         DateTime
+  endDate           DateTime
+  
+  // Status
+  status            ReportStatus     @default(DRAFT)
+  
+  // Content
+  content           Json?            // Report data in JSON format
+  fileUrl           String?          // URL to generated PDF/document
+  
+  // AI generation
+  aiGenerated       Boolean          @default(false)
+  aiPrompt          String?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  publishedAt       DateTime?
+  
+  // Relations
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User             @relation(fields: [userId], references: [id])
+  
+  @@index([organizationId])
+  @@index([reportType])
+  @@index([status])
+  @@index([startDate, endDate])
+}
+
+// =============================================================================
+// AI INTERACTION MODELS
+// =============================================================================
+
+model AIInteraction {
+  id                String           @id @default(uuid())
+  organizationId    String
+  userId            String
+  
+  // Query details
+  query             String           // Natural language query
+  queryType         String           // "insight", "forecast", "recommendation", etc.
+  
+  // AI response
+  response          String
+  confidence        Decimal?         @db.Decimal(5, 4)  // 0-1 confidence score
+  
+  // Processing details
+  provider          String           // "openai", "anthropic"
+  model             String           // "gpt-4", "claude-3-opus", etc.
+  tokensUsed        Int?
+  processingTimeMs  Int?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  
+  // Relations
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User             @relation(fields: [userId], references: [id])
+  
+  @@index([organizationId])
+  @@index([userId])
   @@index([createdAt])
 }
 
-/// FileLock - Checkout locks
-/// Manages exclusive checkout locks to prevent concurrent edits
-model FileLock {
-  id         String    @id @default(cuid())
-  fileId     String    @unique
-  lockedById String
-  lockedAt   DateTime  @default(now())
-  expiresAt  DateTime?
-  lockReason String?
+// =============================================================================
+// AUDIT & COMPLIANCE MODELS
+// =============================================================================
 
-  // Relations
-  file     File @relation("FileLock", fields: [fileId], references: [id], onDelete: Cascade)
-  lockedBy User @relation("LockOwner", fields: [lockedById], references: [id])
-
-  @@index([lockedById])
-  @@index([expiresAt])
-}
-
-/// FileReference - Reference cards shared elsewhere
-/// Tracks when files are shared/referenced in other channels
-model FileReference {
-  id            String   @id @default(cuid())
-  fileId        String
-  projectId     String
-  sharedById    String
-  sharedAt      DateTime @default(now())
-  sharedVersion Int
-  channelId     String
-  messageTs     String
-  threadTs      String?
-
-  // Relations
-  file     File    @relation("FileReferences", fields: [fileId], references: [id], onDelete: Cascade)
-  project  Project @relation("ProjectReferences", fields: [projectId], references: [id], onDelete: Cascade)
-  sharedBy User    @relation("ReferenceSharer", fields: [sharedById], references: [id])
-
-  @@unique([channelId, messageTs])
-  @@index([fileId])
-  @@index([projectId])
-  @@index([sharedById])
-  @@index([channelId])
-}
-
-/// AuditLog - Comprehensive audit logging
-/// Records all significant actions for security and compliance tracking
 model AuditLog {
-  id            String         @id @default(cuid())
-  timestamp     DateTime       @default(now())
-  eventType     AuditEventType
-  outcome       AuditOutcome
-  userId        String?
-  slackUserId   String?
-  ipAddress     String?
-  userAgent     String?
-  projectId     String?
-  fileId        String?
-  fileVersionId String?
-  details       Json?
-
+  id                String           @id @default(uuid())
+  organizationId    String
+  userId            String?
+  
+  // Event details
+  eventType         AuditEventType
+  resourceType      String?          // "emission_record", "goal", "report", etc.
+  resourceId        String?
+  action            String
+  
+  // Context
+  ipAddress         String?
+  userAgent         String?
+  metadata          Json?            // Additional event-specific data
+  
+  // Timestamp
+  createdAt         DateTime         @default(now())
+  
   // Relations
-  user        User?        @relation("AuditUser", fields: [userId], references: [id], onDelete: SetNull)
-  project     Project?     @relation("AuditProject", fields: [projectId], references: [id], onDelete: SetNull)
-  file        File?        @relation("AuditFile", fields: [fileId], references: [id], onDelete: SetNull)
-  fileVersion FileVersion? @relation("AuditFileVersion", fields: [fileVersionId], references: [id], onDelete: SetNull)
-
-  @@index([timestamp])
+  organization      Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User?            @relation(fields: [userId], references: [id])
+  
+  @@index([organizationId])
   @@index([userId])
-  @@index([projectId])
-  @@index([fileId])
   @@index([eventType])
-  @@index([outcome])
-  @@index([slackUserId])
-  @@index([timestamp, eventType])
-  @@index([projectId, timestamp])
-  @@index([fileId, timestamp])
+  @@index([createdAt])
 }
 
-/// DeletionRecord - Secure deletion tracking
-/// Tracks file deletion requests and their secure wipe status
-model DeletionRecord {
-  id               String         @id @default(cuid())
-  requestedAt      DateTime       @default(now())
-  completedAt      DateTime?
-  requestedById    String
-  projectId        String?
-  fileId           String?
-  contentHash      String?
-  reason           String?
-  status           DeletionStatus @default(PENDING)
-  secureWipeUsed   Boolean        @default(false)
-  verificationHash String?
+// =============================================================================
+// INTEGRATION MODELS
+// =============================================================================
 
-  // Relations
-  requestedBy User     @relation("DeletionRequester", fields: [requestedById], references: [id])
-  project     Project? @relation("DeletionProject", fields: [projectId], references: [id], onDelete: SetNull)
-  file        File?    @relation("DeletionFile", fields: [fileId], references: [id], onDelete: SetNull)
-
-  @@index([requestedById])
-  @@index([projectId])
-  @@index([fileId])
-  @@index([status])
-  @@index([requestedAt])
-  @@index([contentHash])
+model Integration {
+  id                String           @id @default(uuid())
+  organizationId    String
+  
+  // Integration details
+  name              String
+  type              IntegrationType
+  provider          String?          // e.g., "SAP", "Salesforce", "AWS"
+  
+  // Configuration
+  config            Json             // Integration-specific configuration
+  credentials       String?          // Encrypted credentials
+  
+  // Status
+  enabled           Boolean          @default(true)
+  lastSyncAt        DateTime?
+  nextSyncAt        DateTime?
+  
+  // Timestamps
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([organizationId])
 }
