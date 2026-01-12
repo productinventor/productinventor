@@ -1,7 +1,7 @@
 {
-  "name": "slack-file-checkout-system",
+  "name": "ecometrics-sustainability-platform",
   "version": "1.0.0",
-  "description": "A Slack-based file checkout system with secure storage and access control",
+  "description": "AI-first sustainability SaaS platform for carbon tracking, ESG reporting, and environmental impact management",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -16,19 +16,27 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "slack",
-    "file-management",
-    "checkout-system",
-    "bolt-js"
+    "sustainability",
+    "carbon-tracking",
+    "esg-reporting",
+    "ai",
+    "machine-learning",
+    "environmental-impact",
+    "climate-tech",
+    "saas"
   ],
-  "author": "",
+  "author": "Product Inventor",
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.17.0",
     "@prisma/client": "^5.22.0",
     "@slack/bolt": "^3.21.0",
+    "express": "^4.18.2",
     "ioredis": "^5.4.1",
     "mime-types": "^2.1.35",
-    "uuid": "^10.0.0"
+    "openai": "^4.28.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
